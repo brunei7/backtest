@@ -1,0 +1,157 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+// © @traderschatroom88
+
+
+
+//@version=6
+
+plot(close)
+
+//@version=6
+
+indicator("premium indicator", overlay=true)
+
+
+
+
+
+
+
+// Heikin Ashi-like smoothing
+
+source = input(close, title="Source for Heikin Ashi-like Smoothing")
+
+haClose = (open + high + low + source) / 4
+
+var float haOpen = na
+
+haOpen := na(haOpen[1]) ? (open + source) / 2 : (haOpen[1] + haClose[1]) / 2
+
+haHigh = math.max(high, math.max(haClose, haOpen))
+
+haLow = math.min(low, math.min(haClose, haOpen))
+
+
+
+// RSI Calculation using smoothed values
+
+rsiPeriod = input.int(14, title="RSI Period")
+
+overboughtLevel = input.float(70, title="Overbought Level")
+
+oversoldLevel = input.float(30, title="Oversold Level")
+
+rsiValue = ta.rsi(haClose, rsiPeriod)
+
+
+
+// Define bar colors based on RSI levels
+
+barColor = rsiValue > overboughtLevel ? color.red : rsiValue < oversoldLevel ? color.green : color.blue
+
+barcolor(barColor, title="RSI Bar Colors")
+
+hline(overboughtLevel, "Overbought Level", color=color.red, linestyle=hline.style_dotted)
+
+hline(oversoldLevel, "Oversold Level", color=color.green, linestyle=hline.style_dotted)
+
+plot(rsiValue, color=color.purple, linewidth=2, title="RSI")
+
+
+
+// Trend Directional Moving Average (TDMA) using EMA
+
+tdmaPeriod = input.int(50, title="TDMA Period")
+
+tdma = ta.ema(close, tdmaPeriod)
+
+tdmaColor = close > tdma ? color.green : color.red
+
+plot(tdma, color=tdmaColor, title="TDMA", linewidth=2)
+
+
+
+// Chandelier Exit (CE) Script
+
+length = input.int(title='ATR Period', defval=22, group='CE Calculation')
+
+mult = input.float(title='ATR Multiplier', step=0.1, defval=3.0, group='CE Calculation')
+
+useClose = input.bool(title='Use Close Price for Extremums', defval=true, group='CE Calculation')
+
+
+
+atr = mult * ta.atr(length)
+
+longStop = (useClose ? ta.highest(close, length) : ta.highest(length)) - atr
+
+longStopPrev = nz(longStop[1], longStop)
+
+longStop := close[1] > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+
+
+shortStop = (useClose ? ta.lowest(close, length) : ta.lowest(length)) + atr
+
+shortStopPrev = nz(shortStop[1], shortStop)
+
+shortStop := close[1] < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+
+
+var int dir = 1
+
+dir := close > shortStopPrev ? 1 : close < longStopPrev ? -1 : dir
+
+
+
+longColor = color.green
+
+shortColor = color.red
+
+longFillColor = color.new(color.green, 90)
+
+shortFillColor = color.new(color.red, 90)
+
+textColor = color.new(color.white, 0)
+
+
+
+longStopPlot = plot(dir == 1 ? longStop : na, title='Long Stop', style=plot.style_linebr, linewidth=2, color=color.new(longColor, 0))
+
+buySignal = dir == 1 and dir[1] == -1
+
+plotshape(buySignal ? longStop : na, title='Long Stop Start', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(longColor, 0))
+
+plotshape(buySignal and true ? longStop : na, title='Buy Label', text='Buy', location=location.absolute, style=shape.labelup, size=size.tiny, color=color.new(longColor, 0), textcolor=textColor)
+
+
+
+shortStopPlot = plot(dir == 1 ? na : shortStop, title='Short Stop', style=plot.style_linebr, linewidth=2, color=color.new(shortColor, 0))
+
+sellSignal = dir == -1 and dir[1] == 1
+
+plotshape(sellSignal ? shortStop : na, title='Short Stop Start', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(shortColor, 0))
+
+plotshape(sellSignal and true ? shortStop : na, title='Sell Label', text='Sell', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(shortColor, 0), textcolor=textColor)
+
+
+
+midPricePlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=1, display=display.none, editable=false) 
+
+longStateFillColor = true ? dir == 1 ? longFillColor : na : na
+
+shortStateFillColor = true ? dir == -1 ? shortFillColor : na : na
+
+fill(midPricePlot, longStopPlot, title='Long State Filling', color=longStateFillColor)
+
+fill(midPricePlot, shortStopPlot, title='Short State Filling', color=shortStateFillColor)
+
+
+
+alertcondition(dir != dir[1], title='Alert: CE Direction Change', message='Chandelier Exit has changed direction!')
+
+alertcondition(buySignal, title='Alert: CE Buy', message='Chandelier Exit Buy!')
+
+alertcondition(sellSignal, title='Alert: CE Sell', message='Chandelier Exit Sell!')
