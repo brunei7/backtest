@@ -1,0 +1,116 @@
+//@version=6
+strategy("YMS Scalper v1.2 Strategy", shorttitle="YMS Strategy",
+         overlay=true,
+         initial_capital=100,
+         default_qty_type=strategy.fixed,
+         default_qty_value=0.01,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=7,
+         slippage=10,
+         currency=currency.USD,
+         calc_on_every_tick=false,
+         process_orders_on_close=false)
+
+// ── YMS Scalper Settings ──────────────────────────────────────
+MA           = input.int(250, "MA (Fast)",          minval=1, group="<<< YMS Scalper Settings >>>")
+PriceAction  = input.int(200, "PriceAction (Slow)", minval=1, group="<<< YMS Scalper Settings >>>")
+Stoch        = input.int(8,   "Stoch (Signal)",     minval=1, group="<<< YMS Scalper Settings >>>")
+DnArrowColor  = input.color(color.fuchsia, "DnArrowColor",  group="<<< Indicator Settings >>>")
+TopArrowColor = input.color(color.aqua,    "TopArrowColor", group="<<< Indicator Settings >>>")
+
+// ── Trend Filter ──────────────────────────────────────────────
+st_mult       = input.float(6.0, "ATR Multiplier",  step=0.5, minval=0.5, group="<<< Trend Filter >>>")
+st_period     = input.int(25,    "ATR Period",       minval=1,             group="<<< Trend Filter >>>")
+filterByTrend = input.bool(true,  "Фильтр по тренду",                      group="<<< Trend Filter >>>")
+min_bars      = input.int(1,      "Мин. баров между сигналами", minval=1,  group="<<< Trend Filter >>>")
+showLine      = input.bool(true,  "Показать линию тренда",                 group="<<< Trend Filter >>>")
+
+// ── TP / SL ───────────────────────────────────────────────────
+sl_mult   = input.float(1.0, "SL Multiplier (ATR)", step=0.1, group="<<< TP / SL >>>")
+tp_mult   = input.float(2.5, "TP Multiplier (ATR)", step=0.1, group="<<< TP / SL >>>")
+show_tpsl = input.bool(true, "Показать TP/SL",               group="<<< TP / SL >>>")
+sl_color  = input.color(color.rgb(255, 80, 80),  "SL цвет",  group="<<< TP / SL >>>")
+tp_color  = input.color(color.rgb(80, 220, 120), "TP цвет",  group="<<< TP / SL >>>")
+
+// ── SuperTrend ────────────────────────────────────────────────
+[stLine, stDir] = ta.supertrend(st_mult, st_period)
+trendBull = stDir < 0
+trendBear = stDir > 0
+stColor   = trendBull ? color.rgb(0, 180, 80) : color.rgb(200, 40, 40)
+
+// ── MACD ──────────────────────────────────────────────────────
+ema_fast    = ta.ema(close, MA)
+ema_slow    = ta.ema(close, PriceAction)
+macd_line   = ema_fast - ema_slow
+signal_line = ta.ema(macd_line, Stoch)
+
+macdBuy  = ta.crossover(macd_line, signal_line)
+macdSell = ta.crossunder(macd_line, signal_line)
+
+trendOkBuy  = not filterByTrend or (trendBull and close > stLine)
+trendOkSell = not filterByTrend or (trendBear and close < stLine)
+
+var int lastBuyBar  = -999
+var int lastSellBar = -999
+
+rawBuy  = macdBuy  and trendOkBuy
+rawSell = macdSell and trendOkSell
+
+buySignal  = rawBuy  and (bar_index - lastBuyBar  >= min_bars)
+sellSignal = rawSell and (bar_index - lastSellBar >= min_bars)
+
+if buySignal
+    lastBuyBar := bar_index
+if sellSignal
+    lastSellBar := bar_index
+
+atrVal = ta.atr(14)
+
+// ══════════════════════════════════════════════════════════════
+// СТРАТЕГИЯ — SL/TP в тиках от цены входа
+// atrVal в тиках = atrVal / syminfo.mintick
+// ══════════════════════════════════════════════════════════════
+atrTicks = math.round(atrVal / syminfo.mintick)
+slTicks  = math.round(atrTicks * sl_mult)
+tpTicks  = math.round(atrTicks * tp_mult)
+
+if buySignal
+    strategy.close("Sell", comment="↩ Close")
+    strategy.entry("Buy", strategy.long, comment="▲ BUY")
+    strategy.exit("Buy TP/SL", from_entry="Buy",
+                  profit = tpTicks,
+                  loss   = slTicks,
+                  comment_profit = "✓ TP",
+                  comment_loss   = "✗ SL")
+
+if sellSignal
+    strategy.close("Buy", comment="↩ Close")
+    strategy.entry("Sell", strategy.short, comment="▼ SELL")
+    strategy.exit("Sell TP/SL", from_entry="Sell",
+                  profit = tpTicks,
+                  loss   = slTicks,
+                  comment_profit = "✓ TP",
+                  comment_loss   = "✗ SL")
+
+// ── Визуализация ──────────────────────────────────────────────
+plot(showLine ? stLine : na, "Trend Line", color=stColor, linewidth=1, style=plot.style_circles)
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, TopArrowColor, size=size.normal)
+plotshape(sellSignal, "Sell", shape.triangledown, location.abovebar, DnArrowColor,  size=size.normal)
+
+// TP/SL линии (визуально от close)
+if show_tpsl and buySignal
+    line.new(bar_index, close - atrVal*sl_mult, bar_index+30, close - atrVal*sl_mult, color=sl_color, width=1, style=line.style_dashed)
+    line.new(bar_index, close + atrVal*tp_mult, bar_index+30, close + atrVal*tp_mult, color=tp_color, width=1, style=line.style_dashed)
+
+if show_tpsl and sellSignal
+    line.new(bar_index, close + atrVal*sl_mult, bar_index+30, close + atrVal*sl_mult, color=sl_color, width=1, style=line.style_dashed)
+    line.new(bar_index, close - atrVal*tp_mult, bar_index+30, close - atrVal*tp_mult, color=tp_color, width=1, style=line.style_dashed)
+
+// Алерты
+alertcondition(buySignal  and barstate.isconfirmed, "YMS Buy",  "YMS BUY {{ticker}} @ {{close}}")
+alertcondition(sellSignal and barstate.isconfirmed, "YMS Sell", "YMS SELL {{ticker}} @ {{close}}")
+// === Dashboard with Telegram Link ===
+var table myTable = table.new(position.top_center, 1, 1, border_width=1, frame_color=color.black, bgcolor=color.white)
+
+// Add Telegram Message to Dashboard
+table.cell(myTable, 0, 0, "Join Telegram @IndicatorsforTV", bgcolor=color.blue, text_color=color.white, text_size=size.normal)

@@ -1,0 +1,405 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Join our channel for more free tools: https://t.me/IndicatorsforTV
+
+//@version=6
+indicator("Full Trendline + SMC System", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+//========================
+// Inputs
+//========================
+gTrend = "Trendlines"
+swingLen = input.int(5, "Swing length", minval=2, group=gTrend)
+keepTrendlines = input.int(8, "Keep trendlines", minval=1, maxval=50, group=gTrend)
+showTrendlines = input.bool(true, "Show trendlines", group=gTrend)
+showTLBreaks = input.bool(true, "Show trendline breaks", group=gTrend)
+
+gSMC = "SMC Structure"
+showStructure = input.bool(true, "Show BOS / CHOCH", group=gSMC)
+showSweeps = input.bool(true, "Show liquidity sweeps", group=gSMC)
+showEQ = input.bool(true, "Show EQH / EQL", group=gSMC)
+eqAtrLen = input.int(14, "EQ tolerance ATR length", minval=1, group=gSMC)
+eqAtrMult = input.float(0.10, "EQ tolerance ATR multiplier", minval=0.01, step=0.01, group=gSMC)
+
+gOB = "Order Blocks"
+showOB = input.bool(true, "Show order blocks", group=gOB)
+obLookback = input.int(20, "OB search lookback", minval=3, maxval=100, group=gOB)
+obExtend = input.int(80, "OB extend bars", minval=5, maxval=500, group=gOB)
+obMode = input.string("Wick", "OB range", options=["Wick", "Body"], group=gOB)
+keepOB = input.int(8, "Keep OB zones", minval=1, maxval=50, group=gOB)
+
+gFVG = "Fair Value Gaps"
+showFVG = input.bool(true, "Show FVG", group=gFVG)
+fvgExtend = input.int(80, "FVG extend bars", minval=5, maxval=500, group=gFVG)
+keepFVG = input.int(10, "Keep FVG zones", minval=1, maxval=50, group=gFVG)
+deleteFilledFVG = input.bool(true, "Delete filled FVG", group=gFVG)
+
+gPD = "Premium / Discount"
+showPD = input.bool(true, "Show 50% equilibrium", group=gPD)
+shadePD = input.bool(false, "Shade premium / discount", group=gPD)
+
+gSignals = "Signals"
+showSignals = input.bool(true, "Show Buy / Sell signals", group=gSignals)
+minConfluence = input.int(3, "Minimum confluence factors", minval=2, maxval=5, group=gSignals)
+requireClosedCandle = input.bool(true, "Require closed candle", group=gSignals)
+useEMAFilter = input.bool(false, "Use EMA trend filter", group=gSignals)
+emaFastLen = input.int(50, "Fast EMA", minval=1, group=gSignals)
+emaSlowLen = input.int(200, "Slow EMA", minval=1, group=gSignals)
+showEMAs = input.bool(false, "Show EMAs", group=gSignals)
+
+gStyle = "Style"
+bullColor = input.color(color.rgb(0, 170, 90), "Bull color", group=gStyle)
+bearColor = input.color(color.rgb(220, 70, 70), "Bear color", group=gStyle)
+neutralColor = input.color(color.rgb(150, 150, 150), "Neutral color", group=gStyle)
+
+//========================
+// Helpers
+//========================
+f_trimLines(array<line> arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        line.delete(array.shift(arr))
+
+f_trimLabels(array<label> arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        label.delete(array.shift(arr))
+
+f_trimBoxes(array<box> arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        box.delete(array.shift(arr))
+
+f_manageOB(array<box> arr, bool bullish, int extBars) =>
+    int i = array.size(arr) - 1
+    while i >= 0
+        box bx = array.get(arr, i)
+        float top = box.get_top(bx)
+        float bot = box.get_bottom(bx)
+        bool invalid = bullish ? close < bot : close > top
+        if invalid
+            box.delete(bx)
+            array.remove(arr, i)
+        else
+            box.set_right(bx, bar_index + extBars)
+        i -= 1
+
+f_manageFVG(array<box> arr, bool bullish, int extBars, bool deleteFilled) =>
+    int i = array.size(arr) - 1
+    while i >= 0
+        box bx = array.get(arr, i)
+        float top = box.get_top(bx)
+        float bot = box.get_bottom(bx)
+        bool filled = bullish ? low <= bot : high >= top
+        if filled and deleteFilled
+            box.delete(bx)
+            array.remove(arr, i)
+        else
+            box.set_right(bx, bar_index + extBars)
+        i -= 1
+
+f_zoneTouched(array<box> arr) =>
+    bool touched = false
+    int i = array.size(arr) - 1
+    while i >= 0
+        box bx = array.get(arr, i)
+        float top = box.get_top(bx)
+        float bot = box.get_bottom(bx)
+        if high >= bot and low <= top
+            touched := true
+        i -= 1
+    touched
+
+f_score(bool condition) =>
+    condition ? 1 : 0
+
+f_getBullOB(int lb, bool useWicks) =>
+    int off = na
+    float top = na
+    float bot = na
+    for i = 1 to lb
+        if na(off) and close[i] < open[i]
+            off := i
+            top := useWicks ? high[i] : open[i]
+            bot := useWicks ? low[i] : close[i]
+    [off, top, bot]
+
+f_getBearOB(int lb, bool useWicks) =>
+    int off = na
+    float top = na
+    float bot = na
+    for i = 1 to lb
+        if na(off) and close[i] > open[i]
+            off := i
+            top := useWicks ? high[i] : close[i]
+            bot := useWicks ? low[i] : open[i]
+    [off, top, bot]
+
+//========================
+// State
+//========================
+var int lastHighBar = na
+var float lastHighPrice = na
+var int prevHighBar = na
+var float prevHighPrice = na
+
+var int lastLowBar = na
+var float lastLowPrice = na
+var int prevLowBar = na
+var float prevLowPrice = na
+
+var int msTrend = 0
+
+var line activeResLine = na
+var line activeSupLine = na
+
+var array<line> resLines = array.new_line()
+var array<line> supLines = array.new_line()
+var array<line> msLines = array.new_line()
+var array<line> eqLines = array.new_line()
+
+var array<label> msLabels = array.new_label()
+var array<label> sweepLabels = array.new_label()
+var array<label> tlLabels = array.new_label()
+var array<label> eqLabels = array.new_label()
+
+var array<box> bullOBs = array.new_box()
+var array<box> bearOBs = array.new_box()
+var array<box> bullFVGs = array.new_box()
+var array<box> bearFVGs = array.new_box()
+
+//========================
+// Swings
+//========================
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+atr = ta.atr(eqAtrLen)
+eqTolerance = atr * eqAtrMult
+
+if not na(ph)
+    int newHighBar = bar_index - swingLen
+
+    if showEQ and not na(lastHighPrice) and math.abs(ph - lastHighPrice) <= eqTolerance
+        float lvl = (ph + lastHighPrice) / 2.0
+        line l = line.new(lastHighBar, lvl, newHighBar, lvl, color=color.new(bearColor, 0), style=line.style_dotted, width=1)
+        label lb = label.new(newHighBar, lvl, "EQH", style=label.style_label_down, color=color.new(bearColor, 0), textcolor=color.white, size=size.tiny)
+        array.push(eqLines, l)
+        array.push(eqLabels, lb)
+        f_trimLines(eqLines, 30)
+        f_trimLabels(eqLabels, 30)
+
+    prevHighBar := lastHighBar
+    prevHighPrice := lastHighPrice
+    lastHighBar := newHighBar
+    lastHighPrice := ph
+
+    if showTrendlines and not na(prevHighBar)
+        activeResLine := line.new(prevHighBar, prevHighPrice, lastHighBar, lastHighPrice, extend=extend.right, color=color.new(bearColor, 0), width=2)
+        array.push(resLines, activeResLine)
+        f_trimLines(resLines, keepTrendlines)
+
+if not na(pl)
+    int newLowBar = bar_index - swingLen
+
+    if showEQ and not na(lastLowPrice) and math.abs(pl - lastLowPrice) <= eqTolerance
+        float lvl = (pl + lastLowPrice) / 2.0
+        line l = line.new(lastLowBar, lvl, newLowBar, lvl, color=color.new(bullColor, 0), style=line.style_dotted, width=1)
+        label lb = label.new(newLowBar, lvl, "EQL", style=label.style_label_up, color=color.new(bullColor, 0), textcolor=color.white, size=size.tiny)
+        array.push(eqLines, l)
+        array.push(eqLabels, lb)
+        f_trimLines(eqLines, 30)
+        f_trimLabels(eqLabels, 30)
+
+    prevLowBar := lastLowBar
+    prevLowPrice := lastLowPrice
+    lastLowBar := newLowBar
+    lastLowPrice := pl
+
+    if showTrendlines and not na(prevLowBar)
+        activeSupLine := line.new(prevLowBar, prevLowPrice, lastLowBar, lastLowPrice, extend=extend.right, color=color.new(bullColor, 0), width=2)
+        array.push(supLines, activeSupLine)
+        f_trimLines(supLines, keepTrendlines)
+
+//========================
+// Trendline Breaks
+//========================
+float resNow = not na(activeResLine) ? line.get_price(activeResLine, bar_index) : na
+float resPrev = not na(activeResLine) ? line.get_price(activeResLine, bar_index - 1) : na
+float supNow = not na(activeSupLine) ? line.get_price(activeSupLine, bar_index) : na
+float supPrev = not na(activeSupLine) ? line.get_price(activeSupLine, bar_index - 1) : na
+
+bullTLBreak = showTrendlines and showTLBreaks and not na(resNow) and close > resNow and close[1] <= resPrev
+bearTLBreak = showTrendlines and showTLBreaks and not na(supNow) and close < supNow and close[1] >= supPrev
+
+if bullTLBreak
+    label lb = label.new(bar_index, low, "TL Break ↑", style=label.style_label_up, color=color.new(bullColor, 0), textcolor=color.white, size=size.tiny)
+    array.push(tlLabels, lb)
+    f_trimLabels(tlLabels, 50)
+
+if bearTLBreak
+    label lb = label.new(bar_index, high, "TL Break ↓", style=label.style_label_down, color=color.new(bearColor, 0), textcolor=color.white, size=size.tiny)
+    array.push(tlLabels, lb)
+    f_trimLabels(tlLabels, 50)
+
+//========================
+// Market Structure
+//========================
+breakUp = showStructure and not na(lastHighPrice) and close > lastHighPrice and close[1] <= lastHighPrice
+breakDown = showStructure and not na(lastLowPrice) and close < lastLowPrice and close[1] >= lastLowPrice
+
+preTrend = msTrend
+
+bullCHOCH = breakUp and preTrend == -1
+bullBOS = breakUp and preTrend != -1
+bearCHOCH = breakDown and preTrend == 1
+bearBOS = breakDown and preTrend != 1
+
+if breakUp
+    string txt = bullCHOCH ? "CHOCH ↑" : "BOS ↑"
+    line l = line.new(lastHighBar, lastHighPrice, bar_index, lastHighPrice, color=color.new(bullColor, 0), style=line.style_dashed)
+    label lb = label.new(bar_index, lastHighPrice, txt, style=label.style_label_down, color=color.new(bullColor, 0), textcolor=color.white, size=size.tiny)
+    array.push(msLines, l)
+    array.push(msLabels, lb)
+    f_trimLines(msLines, 80)
+    f_trimLabels(msLabels, 80)
+    msTrend := 1
+
+if breakDown
+    string txt = bearCHOCH ? "CHOCH ↓" : "BOS ↓"
+    line l = line.new(lastLowBar, lastLowPrice, bar_index, lastLowPrice, color=color.new(bearColor, 0), style=line.style_dashed)
+    label lb = label.new(bar_index, lastLowPrice, txt, style=label.style_label_up, color=color.new(bearColor, 0), textcolor=color.white, size=size.tiny)
+    array.push(msLines, l)
+    array.push(msLabels, lb)
+    f_trimLines(msLines, 80)
+    f_trimLabels(msLabels, 80)
+    msTrend := -1
+
+//========================
+// Order Blocks
+//========================
+useWicks = obMode == "Wick"
+
+if showOB and breakUp
+    [off, top, bot] = f_getBullOB(obLookback, useWicks)
+    if not na(off)
+        box bx = box.new(bar_index - off, top, bar_index + obExtend, bot, border_color=color.new(bullColor, 10), bgcolor=color.new(bullColor, 85))
+        array.push(bullOBs, bx)
+        f_trimBoxes(bullOBs, keepOB)
+
+if showOB and breakDown
+    [off, top, bot] = f_getBearOB(obLookback, useWicks)
+    if not na(off)
+        box bx = box.new(bar_index - off, top, bar_index + obExtend, bot, border_color=color.new(bearColor, 10), bgcolor=color.new(bearColor, 85))
+        array.push(bearOBs, bx)
+        f_trimBoxes(bearOBs, keepOB)
+
+if showOB
+    f_manageOB(bullOBs, true, obExtend)
+    f_manageOB(bearOBs, false, obExtend)
+
+//========================
+// Fair Value Gaps
+//========================
+bullFVG = showFVG and bar_index > 2 and low > high[2]
+bearFVG = showFVG and bar_index > 2 and high < low[2]
+
+if bullFVG
+    box bx = box.new(bar_index - 2, low, bar_index + fvgExtend, high[2], border_color=color.new(bullColor, 35), bgcolor=color.new(bullColor, 88))
+    array.push(bullFVGs, bx)
+    f_trimBoxes(bullFVGs, keepFVG)
+
+if bearFVG
+    box bx = box.new(bar_index - 2, low[2], bar_index + fvgExtend, high, border_color=color.new(bearColor, 35), bgcolor=color.new(bearColor, 88))
+    array.push(bearFVGs, bx)
+    f_trimBoxes(bearFVGs, keepFVG)
+
+if showFVG
+    f_manageFVG(bullFVGs, true, fvgExtend, deleteFilledFVG)
+    f_manageFVG(bearFVGs, false, fvgExtend, deleteFilledFVG)
+
+//========================
+// Liquidity Sweeps
+//========================
+sellSweep = showSweeps and not na(lastHighPrice) and high > lastHighPrice and close < lastHighPrice
+buySweep = showSweeps and not na(lastLowPrice) and low < lastLowPrice and close > lastLowPrice
+
+if sellSweep
+    label lb = label.new(bar_index, high, "BSL Sweep", style=label.style_label_down, color=color.new(bearColor, 0), textcolor=color.white, size=size.tiny)
+    array.push(sweepLabels, lb)
+    f_trimLabels(sweepLabels, 80)
+
+if buySweep
+    label lb = label.new(bar_index, low, "SSL Sweep", style=label.style_label_up, color=color.new(bullColor, 0), textcolor=color.white, size=size.tiny)
+    array.push(sweepLabels, lb)
+    f_trimLabels(sweepLabels, 80)
+
+//========================
+// Premium / Discount
+//========================
+rangeReady = not na(lastHighPrice) and not na(lastLowPrice)
+eqLine = rangeReady ? (lastHighPrice + lastLowPrice) / 2.0 : na
+
+plot(showPD ? eqLine : na, "50% Equilibrium", color=color.new(neutralColor, 0), linewidth=1, style=plot.style_linebr)
+
+pdColor = shadePD and showPD and not na(eqLine) ? close >= eqLine ? color.new(bearColor, 92) : color.new(bullColor, 92) : na
+bgcolor(pdColor)
+
+//========================
+// EMA Filter + Signals
+//========================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+plot(showEMAs ? emaFast : na, "Fast EMA", color=color.new(bullColor, 0))
+plot(showEMAs ? emaSlow : na, "Slow EMA", color=color.new(bearColor, 0))
+
+bullFilter = not useEMAFilter or emaFast > emaSlow
+bearFilter = not useEMAFilter or emaFast < emaSlow
+closeConfirmed = not requireClosedCandle or barstate.isconfirmed
+
+bullStructureFactor = bullBOS or bullCHOCH
+bearStructureFactor = bearBOS or bearCHOCH
+
+bullSweepFactor = buySweep
+bearSweepFactor = sellSweep
+
+bullTLFactor = bullTLBreak
+bearTLFactor = bearTLBreak
+
+bullZoneFactor = bullFVG or (showOB and f_zoneTouched(bullOBs)) or (showFVG and f_zoneTouched(bullFVGs))
+bearZoneFactor = bearFVG or (showOB and f_zoneTouched(bearOBs)) or (showFVG and f_zoneTouched(bearFVGs))
+
+bullTrendFactor = useEMAFilter and emaFast > emaSlow
+bearTrendFactor = useEMAFilter and emaFast < emaSlow
+
+confirmedFactor = requireClosedCandle and barstate.isconfirmed
+
+bullTrigger = bullStructureFactor or bullSweepFactor or bullTLFactor or bullFVG
+bearTrigger = bearStructureFactor or bearSweepFactor or bearTLFactor or bearFVG
+
+bullConfluence = f_score(bullStructureFactor) + f_score(bullSweepFactor) + f_score(bullTLFactor) + f_score(bullZoneFactor) + f_score(bullTrendFactor) + f_score(confirmedFactor)
+bearConfluence = f_score(bearStructureFactor) + f_score(bearSweepFactor) + f_score(bearTLFactor) + f_score(bearZoneFactor) + f_score(bearTrendFactor) + f_score(confirmedFactor)
+
+buySignal = showSignals and closeConfirmed and bullFilter and bullTrigger and (bullConfluence >= minConfluence)
+sellSignal = showSignals and closeConfirmed and bearFilter and bearTrigger and (bearConfluence >= minConfluence)
+
+plotshape(buySignal, title="Buy Signal", text="BUY", style=shape.labelup, location=location.belowbar, color=color.new(bullColor, 0), textcolor=color.white, size=size.tiny)
+plotshape(sellSignal, title="Sell Signal", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.new(bearColor, 0), textcolor=color.white, size=size.tiny)
+
+//========================
+// Alerts
+//========================
+alertcondition(buySignal, "SMC Buy", "SMC Buy signal on {{ticker}} {{interval}}")
+alertcondition(sellSignal, "SMC Sell", "SMC Sell signal on {{ticker}} {{interval}}")
+
+alertcondition(bullBOS, "Bullish BOS", "Bullish BOS on {{ticker}} {{interval}}")
+alertcondition(bearBOS, "Bearish BOS", "Bearish BOS on {{ticker}} {{interval}}")
+alertcondition(bullCHOCH, "Bullish CHOCH", "Bullish CHOCH on {{ticker}} {{interval}}")
+alertcondition(bearCHOCH, "Bearish CHOCH", "Bearish CHOCH on {{ticker}} {{interval}}")
+
+alertcondition(bullTLBreak, "Bullish Trendline Break", "Bullish trendline break on {{ticker}} {{interval}}")
+alertcondition(bearTLBreak, "Bearish Trendline Break", "Bearish trendline break on {{ticker}} {{interval}}")
+
+alertcondition(buySweep, "SSL Sweep", "Sell-side liquidity sweep on {{ticker}} {{interval}}")
+alertcondition(sellSweep, "BSL Sweep", "Buy-side liquidity sweep on {{ticker}} {{interval}}")
+
+alertcondition(bullFVG, "Bullish FVG", "Bullish FVG detected on {{ticker}} {{interval}}")
+alertcondition(bearFVG, "Bearish FVG", "Bearish FVG detected on {{ticker}} {{interval}}")
+

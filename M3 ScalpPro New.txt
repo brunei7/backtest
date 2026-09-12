@@ -1,0 +1,428 @@
+// ============================================================
+// M3 ScalpPro AI By Ab3Q — Gold/XAUUSD Edition
+// Version: 3.0 (Merged Fix Release)
+// Optimised for XAUUSD | Pine Script v6
+// ============================================================
+
+//@version=6
+indicator("M3 ScalpPro AI [XAUUSD]", shorttitle="M3 ScalpPro AI By Ab3Q", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============================================================
+// INPUTS
+// ============================================================
+
+grp_sig = "Signal Settings"
+atr_len       = input.int(14,    "ATR Length",                   group=grp_sig)
+ema_fast      = input.int(9,     "Fast EMA",                     group=grp_sig)
+ema_slow      = input.int(21,    "Slow EMA",                     group=grp_sig)
+ema_trend     = input.int(50,    "Trend EMA",                    group=grp_sig)
+rsi_len       = input.int(14,    "RSI Length",                   group=grp_sig)
+rsi_ob        = input.float(70,  "RSI Overbought",               group=grp_sig)
+rsi_os        = input.float(30,  "RSI Oversold",                 group=grp_sig)
+macd_fast     = input.int(12,    "MACD Fast",                    group=grp_sig)
+macd_slow     = input.int(26,    "MACD Slow",                    group=grp_sig)
+macd_sig_len  = input.int(9,     "MACD Signal",                  group=grp_sig)
+st_factor     = input.float(3.0, "Supertrend Factor",            group=grp_sig)
+st_len        = input.int(10,    "Supertrend ATR Length",        group=grp_sig)
+obv_len       = input.int(14,    "OBV EMA Smoothing",            group=grp_sig)
+
+grp_filter = "Trend / Chop Filter"
+use_adx       = input.bool(true,  "Require ADX Trend Filter",    group=grp_filter)
+adx_len       = input.int(14,     "ADX Length",                  group=grp_filter)
+adx_smooth    = input.int(14,     "ADX Smoothing",                group=grp_filter)
+adx_min       = input.float(20,   "Min ADX to Allow Signal",     group=grp_filter)
+
+grp_cd = "Signal Frequency"
+cooldown_bars = input.int(5, "Min Bars Between Signals", group=grp_cd)
+
+grp_sess = "Session Filter"
+use_session   = input.bool(false, "Restrict to Session", group=grp_sess)
+session_str   = input.session("0800-1700", "Trading Session (Exchange TZ)", group=grp_sess)
+
+grp_tp = "TP / SL Settings"
+tp1_mult      = input.float(1.5, "TP1 ATR Multiplier", group=grp_tp, step=0.1)
+tp2_mult      = input.float(3.0, "TP2 ATR Multiplier", group=grp_tp, step=0.1)
+tp3_mult      = input.float(5.0, "TP3 ATR Multiplier", group=grp_tp, step=0.1)
+sl_mult       = input.float(1.2, "SL ATR Multiplier",  group=grp_tp, step=0.1)
+use_breakeven = input.bool(true, "Move SL to Breakeven after TP1", group=grp_tp)
+line_extend   = input.int(40, "Line Extend (bars)", group=grp_tp)
+
+grp_tbl = "Pip Tracker Table"
+show_table    = input.bool(true, "Show Pip Tracker Table", group=grp_tbl)
+tbl_pos       = input.string("Bottom Right", "Table Position",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grp_tbl)
+pip_lookback  = input.int(20, "Pip History Bars", group=grp_tbl)
+pip_size_in   = input.float(0.1, "Pip Size (XAUUSD, e.g. 0.10)", group=grp_tbl)
+
+grp_disp = "Display Settings"
+show_emas     = input.bool(true, "Show EMAs",                group=grp_disp)
+show_signals  = input.bool(true, "Show Buy/Sell Labels",     group=grp_disp)
+show_levels   = input.bool(true, "Show TP/SL Levels",        group=grp_disp)
+
+grp_alert = "Alert Settings"
+alert_on_buy  = input.bool(true, "Alert on Buy Signal",           group=grp_alert)
+alert_on_sell = input.bool(true, "Alert on Sell Signal",          group=grp_alert)
+alert_on_conf = input.int(70,    "Min Confidence for Alert (%)",  group=grp_alert, minval=0, maxval=100)
+
+// ============================================================
+// CORE CALCULATIONS
+// ============================================================
+
+pip_size = pip_size_in
+
+atr   = ta.atr(atr_len)
+ema_f = ta.ema(close, ema_fast)
+ema_s = ta.ema(close, ema_slow)
+ema_t = ta.ema(close, ema_trend)
+rsi   = ta.rsi(close, rsi_len)
+[macd_line, macd_sig, macd_hist] = ta.macd(close, macd_fast, macd_slow, macd_sig_len)
+[st_val, st_dir] = ta.supertrend(st_factor, st_len)
+[dmi_plus, dmi_minus, adx_val] = ta.dmi(adx_len, adx_smooth)
+
+// FIX: timeframe-agnostic daily range (was hardcoded 288 bars = wrong on non-5min charts)
+[day_high, day_low] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_off)
+daily_range = (day_high - day_low) / pip_size
+
+obv_src  = ta.obv
+obv_ema  = ta.ema(obv_src, obv_len)
+vol_bull = obv_src > obv_ema
+vol_bear = obv_src < obv_ema
+
+bull_trend = close > ema_t and ema_f > ema_s
+bear_trend = close < ema_t and ema_f < ema_s
+
+bull_mom = macd_line > macd_sig and macd_hist > 0
+bear_mom = macd_line < macd_sig and macd_hist < 0
+
+rsi_bull = rsi > 50 and rsi < rsi_ob
+rsi_bear = rsi < 50 and rsi > rsi_os
+
+bull_engulf = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bear_engulf = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+bull_pin    = (high - close) < (close - low) * 0.3 and (close - open) > 0
+bear_pin    = (close - low) < (high - close) * 0.3 and (open - close) > 0
+
+st_bull = st_dir < 0
+st_bear = st_dir > 0
+
+trending = use_adx ? adx_val >= adx_min : true
+
+in_session = true
+if use_session
+    sess_time = time(timeframe.period, session_str)
+    in_session := not na(sess_time)
+
+// ============================================================
+// CONFLUENCE SCORE
+// ============================================================
+
+score_buy = 0
+score_buy := score_buy + (bull_trend              ? 20 : 0)
+score_buy := score_buy + (bull_mom                ? 20 : 0)
+score_buy := score_buy + (rsi_bull                ? 15 : 0)
+score_buy := score_buy + (vol_bull                ? 15 : 0)
+score_buy := score_buy + (st_bull                 ? 15 : 0)
+score_buy := score_buy + (bull_engulf or bull_pin ? 15 : 0)
+
+score_sell = 0
+score_sell := score_sell + (bear_trend              ? 20 : 0)
+score_sell := score_sell + (bear_mom                ? 20 : 0)
+score_sell := score_sell + (rsi_bear                ? 15 : 0)
+score_sell := score_sell + (vol_bear                ? 15 : 0)
+score_sell := score_sell + (st_bear                 ? 15 : 0)
+score_sell := score_sell + (bear_engulf or bear_pin ? 15 : 0)
+
+// ============================================================
+// SIGNAL GENERATION (repaint-safe, ADX-filtered, cooldown, session)
+// ============================================================
+
+ema_cross_up   = ta.crossover(ema_f, ema_s)
+ema_cross_down = ta.crossunder(ema_f, ema_s)
+
+var int last_signal_bar = -1000
+can_signal = (bar_index - last_signal_bar) >= cooldown_bars
+
+raw_buy  = ema_cross_up   and bull_trend and score_buy  >= 50
+raw_sell = ema_cross_down and bear_trend and score_sell >= 50
+
+// FIX: barstate.isconfirmed prevents repainting on live/unclosed bar
+buy_signal  = raw_buy  and trending and in_session and can_signal and barstate.isconfirmed
+sell_signal = raw_sell and trending and in_session and can_signal and barstate.isconfirmed
+
+if buy_signal or sell_signal
+    last_signal_bar := bar_index
+
+// ============================================================
+// TP / SL PRICE LEVELS + TRADE STATE TRACKING
+// ============================================================
+
+var float entry_price = na
+var float sl_price    = na
+var float tp1_price   = na
+var float tp2_price   = na
+var float tp3_price   = na
+var int   signal_dir  = 0
+var int   active_conf = 0
+var bool  tp1_hit     = false
+var bool  tp2_hit     = false
+var bool  tp3_hit     = false
+var bool  sl_hit      = false
+var bool  be_moved    = false
+
+if buy_signal
+    entry_price := close
+    sl_price    := close - atr * sl_mult
+    tp1_price   := close + atr * tp1_mult
+    tp2_price   := close + atr * tp2_mult
+    tp3_price   := close + atr * tp3_mult
+    signal_dir  := 1
+    active_conf := score_buy
+    tp1_hit  := false
+    tp2_hit  := false
+    tp3_hit  := false
+    sl_hit   := false
+    be_moved := false
+
+if sell_signal
+    entry_price := close
+    sl_price    := close + atr * sl_mult
+    tp1_price   := close - atr * tp1_mult
+    tp2_price   := close - atr * tp2_mult
+    tp3_price   := close - atr * tp3_mult
+    signal_dir  := -1
+    active_conf := score_sell
+    tp1_hit  := false
+    tp2_hit  := false
+    tp3_hit  := false
+    sl_hit   := false
+    be_moved := false
+
+// FIX: track TP/SL hits and reset signal_dir to 0 so "WAIT" state is meaningful again
+if signal_dir == 1
+    if not tp1_hit and high >= tp1_price
+        tp1_hit := true
+        if use_breakeven and not be_moved
+            sl_price := entry_price
+            be_moved := true
+    if not tp2_hit and high >= tp2_price
+        tp2_hit := true
+    if not tp3_hit and high >= tp3_price
+        tp3_hit := true
+        signal_dir := 0
+    if low <= sl_price
+        sl_hit := true
+        signal_dir := 0
+
+if signal_dir == -1
+    if not tp1_hit and low <= tp1_price
+        tp1_hit := true
+        if use_breakeven and not be_moved
+            sl_price := entry_price
+            be_moved := true
+    if not tp2_hit and low <= tp2_price
+        tp2_hit := true
+    if not tp3_hit and low <= tp3_price
+        tp3_hit := true
+        signal_dir := 0
+    if high >= sl_price
+        sl_hit := true
+        signal_dir := 0
+
+// ============================================================
+// EMA PLOTS
+// ============================================================
+
+plot(show_emas ? ema_f : na, "Fast EMA",  color=color.new(#00E5FF, 0), linewidth=1)
+plot(show_emas ? ema_s : na, "Slow EMA",  color=color.new(#FF6B35, 0), linewidth=1)
+plot(show_emas ? ema_t : na, "Trend EMA", color=color.new(#FFFFFF, 60), linewidth=2)
+
+// ============================================================
+// BUY / SELL LABELS
+// ============================================================
+
+if show_signals and buy_signal
+    label.new(bar_index, low - atr * 0.8,
+         text      = "BUY\n" + str.tostring(score_buy) + "% AI",
+         color     = color.new(#00C853, 0),
+         textcolor = color.white,
+         style     = label.style_label_up,
+         size      = size.small)
+
+if show_signals and sell_signal
+    label.new(bar_index, high + atr * 0.8,
+         text      = "SELL\n" + str.tostring(score_sell) + "% AI",
+         color     = color.new(#FF1744, 0),
+         textcolor = color.white,
+         style     = label.style_label_down,
+         size      = size.small)
+
+// ============================================================
+// TP / SL LEVEL LINES
+// ============================================================
+
+var line line_entry = na
+var line line_sl    = na
+var line line_tp1   = na
+var line line_tp2   = na
+var line line_tp3   = na
+var label lbl_entry = na
+var label lbl_sl    = na
+var label lbl_tp1   = na
+var label lbl_tp2   = na
+var label lbl_tp3   = na
+
+if show_levels and (buy_signal or sell_signal)
+    line.delete(line_entry)
+    line.delete(line_sl)
+    line.delete(line_tp1)
+    line.delete(line_tp2)
+    line.delete(line_tp3)
+    label.delete(lbl_entry)
+    label.delete(lbl_sl)
+    label.delete(lbl_tp1)
+    label.delete(lbl_tp2)
+    label.delete(lbl_tp3)
+
+    col_tp = buy_signal ? color.new(#00C853, 30) : color.new(#FF1744, 30)
+    col_sl = buy_signal ? color.new(#FF1744, 30) : color.new(#00C853, 30)
+    col_en = color.new(#FFD600, 20)
+
+    x2 = bar_index + line_extend
+
+    tp1_pips = math.abs(tp1_price - entry_price) / pip_size
+    tp2_pips = math.abs(tp2_price - entry_price) / pip_size
+    tp3_pips = math.abs(tp3_price - entry_price) / pip_size
+    sl_pips  = math.abs(sl_price  - entry_price) / pip_size
+
+    line_entry := line.new(bar_index, entry_price, x2, entry_price, color=col_en, width=2, style=line.style_dashed)
+    line_sl    := line.new(bar_index, sl_price,    x2, sl_price,    color=col_sl, width=2, style=line.style_dotted)
+    line_tp1   := line.new(bar_index, tp1_price,   x2, tp1_price,   color=col_tp, width=1, style=line.style_dashed)
+    line_tp2   := line.new(bar_index, tp2_price,   x2, tp2_price,   color=col_tp, width=2, style=line.style_dashed)
+    line_tp3   := line.new(bar_index, tp3_price,   x2, tp3_price,   color=col_tp, width=3, style=line.style_solid)
+
+    lbl_entry := label.new(x2, entry_price,
+         "ENTRY " + str.tostring(entry_price, "#.##"),
+         color=col_en, textcolor=color.black, style=label.style_label_left, size=size.small)
+    lbl_sl    := label.new(x2, sl_price,
+         "SL " + str.tostring(sl_price, "#.##") + " (-" + str.tostring(sl_pips, "#") + "p)",
+         color=col_sl, textcolor=color.white, style=label.style_label_left, size=size.small)
+    lbl_tp1   := label.new(x2, tp1_price,
+         "TP1 " + str.tostring(tp1_price, "#.##") + " (+" + str.tostring(tp1_pips, "#") + "p)",
+         color=col_tp, textcolor=color.white, style=label.style_label_left, size=size.small)
+    lbl_tp2   := label.new(x2, tp2_price,
+         "TP2 " + str.tostring(tp2_price, "#.##") + " (+" + str.tostring(tp2_pips, "#") + "p)",
+         color=col_tp, textcolor=color.white, style=label.style_label_left, size=size.small)
+    lbl_tp3   := label.new(x2, tp3_price,
+         "TP3 " + str.tostring(tp3_price, "#.##") + " (+" + str.tostring(tp3_pips, "#") + "p)",
+         color=col_tp, textcolor=color.white, style=label.style_label_left, size=size.small)
+
+// keep SL line/label synced if breakeven trail moves it
+if show_levels and be_moved and not na(line_sl)
+    line.set_y1(line_sl, sl_price)
+    line.set_y2(line_sl, sl_price)
+    if not na(lbl_sl)
+        label.set_y(lbl_sl, sl_price)
+        label.set_text(lbl_sl, "SL (BE) " + str.tostring(sl_price, "#.##"))
+
+// ============================================================
+// PIP TRACKER TABLE
+// ============================================================
+
+tbl_position = switch tbl_pos
+    "Top Right"    => position.top_right
+    "Top Left"     => position.top_left
+    "Bottom Left"  => position.bottom_left
+    => position.bottom_right
+
+var table pip_tbl = table.new(tbl_position, 3, 10,
+     bgcolor      = color.new(#0D1117, 5),
+     border_color = color.new(#FFD600, 60),
+     border_width = 1,
+     frame_color  = color.new(#FFD600, 40),
+     frame_width  = 2)
+
+bar_pips_cur = (high - low) / pip_size
+avg_pips     = ta.sma(high - low, pip_lookback) / pip_size   // simplified from manual loop
+
+// FIX: use the FROZEN confidence from signal time, not live recompute
+conf_val   = active_conf
+conf_color = conf_val >= 75 ? color.new(#00C853, 0) :
+             conf_val >= 50 ? color.new(#FFD600, 0) :
+                              color.new(#FF1744, 0)
+
+if show_table and barstate.islast
+    table.cell(pip_tbl, 0, 0, "M3 ScalpPro AI",
+         text_color=color.new(#FFD600, 0), text_size=size.small,
+         bgcolor=color.new(#1A1A2E, 0), text_halign=text.align_center)
+    table.merge_cells(pip_tbl, 0, 0, 2, 0)
+
+    table.cell(pip_tbl, 0, 1, "Metric", text_color=color.new(#90CAF9,0), text_size=size.small, bgcolor=color.new(#1A2332,0))
+    table.cell(pip_tbl, 1, 1, "Value",  text_color=color.new(#90CAF9,0), text_size=size.small, bgcolor=color.new(#1A2332,0))
+    table.cell(pip_tbl, 2, 1, "Info",   text_color=color.new(#90CAF9,0), text_size=size.small, bgcolor=color.new(#1A2332,0))
+
+    table.cell(pip_tbl, 0, 2, "Symbol",        text_color=color.white,           text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 1, 2, syminfo.ticker,  text_color=color.new(#FFD600,0),  text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 2, 2, timeframe.period + " TF", text_color=color.gray,   text_size=size.small, bgcolor=color.new(#111827,0))
+
+    bar_status = bar_pips_cur > avg_pips * 1.5 ? "High Vol" : bar_pips_cur < avg_pips * 0.5 ? "Low Vol" : "Normal"
+    table.cell(pip_tbl, 0, 3, "Bar Range", text_color=color.white, text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 1, 3, str.tostring(bar_pips_cur, "#.#") + " pips", text_color=color.new(#4FC3F7,0), text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 2, 3, bar_status, text_color=color.new(#80CBC4,0), text_size=size.small, bgcolor=color.new(#111827,0))
+
+    table.cell(pip_tbl, 0, 4, "Avg Range", text_color=color.white, text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 1, 4, str.tostring(avg_pips, "#.#") + " pips", text_color=color.new(#4FC3F7,0), text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 2, 4, str.tostring(pip_lookback) + " bars", text_color=color.gray, text_size=size.small, bgcolor=color.new(#111827,0))
+
+    table.cell(pip_tbl, 0, 5, "Day Range", text_color=color.white, text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 1, 5, str.tostring(daily_range, "#") + " pips", text_color=color.new(#CE93D8,0), text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 2, 5, "Prior Day", text_color=color.gray, text_size=size.small, bgcolor=color.new(#111827,0))
+
+    table.cell(pip_tbl, 0, 6, "ATR", text_color=color.white, text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 1, 6, str.tostring(atr / pip_size, "#.#") + " pips", text_color=color.new(#4FC3F7,0), text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 2, 6, "Volatility", text_color=color.gray, text_size=size.small, bgcolor=color.new(#111827,0))
+
+    sig_txt = signal_dir == 1 ? "BUY (Active)" : signal_dir == -1 ? "SELL (Active)" : "WAIT"
+    sig_col = signal_dir == 1 ? color.new(#00C853,0) : signal_dir == -1 ? color.new(#FF1744,0) : color.new(#607D8B,0)
+    table.cell(pip_tbl, 0, 7, "AI Conf.", text_color=color.white, text_size=size.small, bgcolor=color.new(#1A2332,0))
+    table.cell(pip_tbl, 1, 7, str.tostring(conf_val) + "%", text_color=conf_color, text_size=size.small, bgcolor=color.new(#1A2332,0))
+    table.cell(pip_tbl, 2, 7, sig_txt, text_color=sig_col, text_size=size.small, bgcolor=color.new(#1A2332,0))
+
+    bias_txt = bull_trend ? "BULLISH" : bear_trend ? "BEARISH" : "NEUTRAL"
+    bias_col = bull_trend ? color.new(#00C853,0) : bear_trend ? color.new(#FF1744,0) : color.new(#FFD600,0)
+    table.cell(pip_tbl, 0, 8, "Trend", text_color=color.white, text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 1, 8, bias_txt, text_color=bias_col, text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 2, 8, "RSI: " + str.tostring(rsi, "#.#"), text_color=color.new(#80CBC4,0), text_size=size.small, bgcolor=color.new(#111827,0))
+
+    tp_status = tp3_hit ? "TP3 ✅" : tp2_hit ? "TP2 ✅" : tp1_hit ? "TP1 ✅" : sl_hit ? "SL ❌" : "Pending"
+    table.cell(pip_tbl, 0, 9, "Trade State", text_color=color.white, text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 1, 9, tp_status, text_color=sl_hit ? color.red : color.new(#4FC3F7,0), text_size=size.small, bgcolor=color.new(#111827,0))
+    table.cell(pip_tbl, 2, 9, "ADX: " + str.tostring(adx_val, "#.#"), text_color=color.gray, text_size=size.small, bgcolor=color.new(#111827,0))
+
+// ============================================================
+// BACKGROUND SHADING + PLOTSHAPE
+// ============================================================
+
+bgcolor(buy_signal  ? color.new(#00C853, 92) : na, title="Buy Signal BG")
+bgcolor(sell_signal ? color.new(#FF1744, 92) : na, title="Sell Signal BG")
+
+plotshape(buy_signal,  title="Buy",  style=shape.triangleup,   location=location.belowbar, color=#00C853, size=size.small)
+plotshape(sell_signal, title="Sell", style=shape.triangledown, location=location.abovebar, color=#FF1744, size=size.small)
+
+// ============================================================
+// ALERTS
+// ============================================================
+
+buy_alert_cond  = buy_signal  and score_buy  >= alert_on_conf and alert_on_buy
+sell_alert_cond = sell_signal and score_sell >= alert_on_conf and alert_on_sell
+
+alertcondition(buy_alert_cond,
+     title   = "M3 ScalpPro AI - BUY",
+     message = "XAUUSD BUY Signal | Price: {{close}} | Check chart for TP/SL levels.")
+
+alertcondition(sell_alert_cond,
+     title   = "M3 ScalpPro AI - SELL",
+     message = "XAUUSD SELL Signal | Price: {{close}} | Check chart for TP/SL levels.")
+
+alertcondition(buy_signal or sell_signal,
+     title   = "M3 ScalpPro AI - Any Signal",
+     message = "M3 ScalpPro AI Signal on XAUUSD | Price: {{close}}")

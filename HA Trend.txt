@@ -1,0 +1,183 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © traderschatroom88
+
+//@version=6
+// ─────────────────────────────────────────────
+// Indicator: HA Trend Reclaim (Daily High / Low)
+// Creator: DesertBum
+// ─────────────────────────────────────────────
+
+indicator("HA Trend", overlay=true)
+
+//=========================
+// INPUTS
+//=========================
+useHeikinAshi = input.bool(true, "Use Heikin Ashi")
+maxDojiPct    = input.float(0.1, "Max Body % for Doji", step=0.01)
+
+emaFastLen = input.int(9, "EMA 9 Length")
+emaSlowLen = input.int(50, "EMA 50 Length")
+
+swingLookback = input.int(15, "Swing Lookback", minval=5)
+runnerRR      = input.float(2.0, "Runner RR", step=0.1)
+showStops     = input.bool(true, "Show SL / TP levels")
+
+showDailyBoxes = input.bool(true, "Show Daily Range Boxes")
+
+//=========================
+// HEIKIN ASHI DATA
+//=========================
+haTicker = ticker.heikinashi(syminfo.tickerid)
+
+haOpen  = useHeikinAshi ? request.security(haTicker, timeframe.period, open)  : open
+haHigh  = useHeikinAshi ? request.security(haTicker, timeframe.period, high)  : high
+haLow   = useHeikinAshi ? request.security(haTicker, timeframe.period, low)   : low
+haClose = useHeikinAshi ? request.security(haTicker, timeframe.period, close) : close
+
+//=========================
+// EMA CALCULATIONS
+//=========================
+emaFast = ta.ema(haClose, emaFastLen)
+emaSlow = ta.ema(haClose, emaSlowLen)
+
+plot(emaSlow, "EMA 50", color=color.green, linewidth=2)
+plot(emaFast, "EMA 9", color=emaFast > emaFast[1] ? color.lime : color.red, linewidth=2)
+
+//=========================
+// CANDLE QUALITY
+//=========================
+bodySize    = math.abs(haClose - haOpen)
+candleRange = haHigh - haLow
+bodyPct     = candleRange > 0 ? bodySize / candleRange : 0.0
+
+notDoji   = bodyPct > maxDojiPct
+bullishHA = haClose > haOpen
+bearishHA = haClose < haOpen
+
+//=========================
+// TREND FILTERS
+//=========================
+trendBull = emaFast > emaSlow and haClose > emaSlow and emaFast > emaFast[1]
+trendBear = emaFast < emaSlow and haClose < emaSlow and emaFast < emaFast[1]
+
+//=========================
+// 🔐 LONG / SHORT STATES
+//=========================
+var bool pullbackReadyLong  = false
+var bool deepPullbackLong   = false
+var bool pullbackReadyShort = false
+var bool deepPullbackShort  = false
+
+if haClose < emaFast
+    pullbackReadyLong := true
+if pullbackReadyLong and haLow <= emaSlow
+    deepPullbackLong := true
+reclaimLong = pullbackReadyLong and deepPullbackLong and haClose > emaFast
+
+if haClose > emaFast
+    pullbackReadyShort := true
+if pullbackReadyShort and haHigh >= emaSlow
+    deepPullbackShort := true
+reclaimShort = pullbackReadyShort and deepPullbackShort and haClose < emaFast
+
+//=========================
+// SIGNALS
+//=========================
+longSignal  = trendBull and bullishHA and notDoji and reclaimLong
+shortSignal = trendBear and bearishHA and notDoji and reclaimShort
+
+if longSignal
+    pullbackReadyLong := false
+    deepPullbackLong  := false
+if shortSignal
+    pullbackReadyShort := false
+    deepPullbackShort  := false
+
+//=========================
+// RISK & TARGETS
+//=========================
+entryLong = close
+stopLong  = ta.lowest(low, swingLookback)
+riskLong  = entryLong - stopLong
+
+entryShort = close
+stopShort  = ta.highest(high, swingLookback)
+riskShort  = stopShort - entryShort
+
+tp1Long  = entryLong + riskLong
+tp2Long  = entryLong + riskLong * runnerRR
+tp1Short = entryShort - riskShort
+tp2Short = entryShort - riskShort * runnerRR
+
+//=========================
+// VISUALS (LONG / SHORT)
+//=========================
+plotshape(
+    longSignal,
+    title="LONG",
+    text="LONG",
+    style=shape.labelup,
+    location=location.belowbar,
+    color=color.lime,
+    textcolor=color.black
+)
+
+plotshape(
+    shortSignal,
+    title="SHORT",
+    text="SHORT",
+    style=shape.labeldown,
+    location=location.abovebar,
+    color=color.red,
+    textcolor=color.white
+)
+
+plot(showStops and longSignal  ? stopLong  : na, "SL Long",  color=color.red,    linewidth=2, style=plot.style_linebr)
+plot(showStops and longSignal  ? tp1Long   : na, "TP1 Long", color=color.orange, linewidth=2, style=plot.style_linebr)
+plot(showStops and longSignal  ? tp2Long   : na, "TP2 Long", color=color.lime,   linewidth=2, style=plot.style_linebr)
+
+plot(showStops and shortSignal ? stopShort : na, "SL Short",  color=color.red,    linewidth=2, style=plot.style_linebr)
+plot(showStops and shortSignal ? tp1Short  : na, "TP1 Short", color=color.orange, linewidth=2, style=plot.style_linebr)
+plot(showStops and shortSignal ? tp2Short  : na, "TP2 Short", color=color.lime,   linewidth=2, style=plot.style_linebr)
+
+//=========================
+// 📦 DAILY RANGE BOXES
+//=========================
+newDay = ta.change(time("D")) != 0
+
+var float dayHigh = na
+var float dayLow  = na
+var float dayOpen = na
+var box   dayBox  = na
+
+if newDay
+    dayHigh := high
+    dayLow  := low
+    dayOpen := open
+
+    if showDailyBoxes
+        dayBox := box.new(
+            bar_index,
+            high,
+            bar_index,
+            low,
+            xloc = xloc.bar_index,
+            bgcolor = na,
+            border_width = 0
+        )
+else
+    dayHigh := math.max(dayHigh, high)
+    dayLow  := math.min(dayLow, low)
+
+if showDailyBoxes and not na(dayBox)
+    bullishDay = close >= dayOpen
+    box.set_right(dayBox, bar_index)
+    box.set_top(dayBox, dayHigh)
+    box.set_bottom(dayBox, dayLow)
+    box.set_bgcolor(dayBox, bullishDay ? color.new(color.lime, 80) : color.new(color.red, 80))
+
+//=========================
+// ALERTS (LONG / SHORT)
+//=========================
+alertcondition(longSignal,  title="LONG",  message="HA Trend Reclaim LONG | DesertBum")
+alertcondition(shortSignal, title="SHORT", message="HA Trend Reclaim SHORT | DesertBum")

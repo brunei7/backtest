@@ -1,0 +1,972 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Join our channel for more free tools: https://t.me/IndicatorsforTV
+
+//@version=5
+indicator('AURA: SuperAlgo for Ultimate Reversal Analysis', overlay=true, precision=0, linktoseries=true, max_bars_back=1000, max_lines_count=500, max_labels_count=500)
+
+// === Trend Continuation Candles ===
+showContinuation = input.bool(true, "Показать свечи продолжения тренда", group="Продолжение тренда")
+continuationColor = input.color(color.black, "Цвет свечей продолжения", group="Продолжение тренда")
+
+// Determine trend continuation conditions
+uptrendContinues = close > open and close[1] > open[1] and close > close[1]
+downtrendContinues = close < open and close[1] < open[1] and close < close[1]
+
+// Plot continuation candles
+plotcandle(showContinuation and uptrendContinues ? open : na,
+           showContinuation and uptrendContinues ? high : na,
+           showContinuation and uptrendContinues ? low : na,
+           showContinuation and uptrendContinues ? close : na,
+           title="Продолжение восходящего тренда",
+           color=continuationColor,
+           wickcolor=continuationColor,
+           editable=false)
+
+plotcandle(showContinuation and downtrendContinues ? open : na,
+           showContinuation and downtrendContinues ? high : na,
+           showContinuation and downtrendContinues ? low : na,
+           showContinuation and downtrendContinues ? close : na,
+           title="Продолжение нисходящего тренда",
+           color=continuationColor,
+           wickcolor=continuationColor,
+           editable=false)
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//===== VWAP =====
+showVWAP = input.bool(title="Показать VWAP", defval=false, group="██████VWAP██████")
+VWAPSource = input.source(title="Источник VWAP", defval=hl2, group="VWAP")
+VWAPrice = ta.vwap(VWAPSource)
+plot(showVWAP ? VWAPrice : na, color=color.blue, title="VWAP", linewidth=2)
+
+// Inputs
+disable_repeating_signals_param = input.bool(false, 'Отключить повторяющиеся сигналы', group='Технические')
+useRes = input(true, 'Использовать альтернативные сигналы', group='Технические')
+intRes = input(8, 'Множитель для альтернативных сигналов', group='Технические')
+basisType = input.string('ALMA', 'Тип MA: ', options=['HullMA', 'ALMA'], group='Технические')
+basisLen = input.int(2, 'Период MA', minval=1, group='Технические')
+offsetSigma = input.int(5, 'Смещение для LSMA / Сигма для ALMA', minval=0, group='Технические')
+offsetALMA = input.float(0.85, 'Смещение для ALMA', minval=0, step=0.01, group='Технические')
+tradeType = input.string('BOTH', 'Какие сделки брать: ', options=['LONG', 'SHORT', 'BOTH', 'NONE'], group='Технические')
+
+// Timeframe resolution
+stratRes = timeframe.ismonthly ? str.tostring(timeframe.multiplier * intRes, '###M') :
+           timeframe.isweekly ? str.tostring(timeframe.multiplier * intRes, '###W') :
+           timeframe.isdaily ? str.tostring(timeframe.multiplier * intRes, '###D') :
+           timeframe.isintraday ? str.tostring(timeframe.multiplier * intRes, '####') :
+           '60'
+
+// Global elements
+var target_bullf = 0.
+var target_bearf = 0.
+
+// Colours
+green100 = #008000FF
+red100 = #FF0000FF
+
+// Non-repainting security function
+rp_security(_symbol, _res, _src) =>
+    request.security(_symbol, _res, _src[barstate.isrealtime ? 1 : 0])
+
+// Base Functions
+variant(type, src, len, offSig, offALMA) =>
+    v1 = ta.sma(src, len) // Simple MA
+    v2 = ta.ema(src, len) // Exponential MA
+    v8 = ta.wma(2 * ta.wma(src, len / 2) - ta.wma(src, len), math.round(math.sqrt(len))) // Hull MA
+    v10 = ta.alma(src, len, offALMA, offSig) // ALMA
+    switch type
+        'ALMA' => v10
+        'HullMA' => v2
+        => v1
+
+// Security wrapper
+reso(exp, use, res) =>
+    security_1 = request.security(syminfo.tickerid, res, exp, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+    use ? security_1 : exp
+
+// Series Setup
+closeSeries = variant(basisType, close, basisLen, offsetSigma, offsetALMA)
+openSeries = variant(basisType, open, basisLen, offsetSigma, offsetALMA)
+closeSeriesAlt = reso(closeSeries, useRes, stratRes)
+openSeriesAlt = reso(openSeries, useRes, stratRes)
+
+// Alert conditions
+leTrigger = ta.crossover(closeSeriesAlt, openSeriesAlt)
+seTrigger = ta.crossunder(closeSeriesAlt, openSeriesAlt)
+
+i_src = close
+// Entry & Exit Levels
+var float condition = 0.0
+var float slLine = 0.0
+var float entryLine = 0.0
+
+entryLine := leTrigger and condition[1] <= 0.0 ? close :
+             seTrigger and condition[1] >= 0.0 ? close : nz(entryLine[1])
+
+//=============================================================================
+// superTrend - Trend Confidence
+//===========================================================================
+supAtr = input.int(14, "Длина ATR", 1, group="Supertrend", inline="1")
+factor = input.float(3.0, "   Фактор", group="Supertrend", inline="1")
+pltChk = input.bool(true, "Показать линию Supertrend?", group="Supertrend", inline="2")
+upCol = input.color(color.green, "   ", group="Supertrend", inline="2")
+dnCol = input.color(color.red, "", group="Supertrend", inline="2")
+[super, dirc] = ta.supertrend(factor, supAtr)
+var intlSupr = float(na), var rangSupr = float(na)
+intlSupr := dirc != dirc[1] ? super : intlSupr
+rangSupr := dirc != dirc[1] ? math.abs(super - super[1]) : rangSupr
+// ++++++++++++ Calculate Fib Levels Function
+fibLev(x) => intlSupr + (dirc == -1 ? rangSupr : -rangSupr) * x
+levFib(x) => (x - intlSupr) / (dirc == -1 ? rangSupr : -rangSupr)
+
+bearf = seTrigger and pltChk and dirc < 0
+bullf = leTrigger and pltChk and dirc > 0
+
+buylbl = #388e3c
+selllbl = #b22833
+txtcl = color.rgb(0, 0, 0, 100)
+
+label_size = input.string('normal', 'Размер метки', options=['huge', 'large', 'normal', 'small', 'tiny'], group='Косметика')
+label_style = input.string('text bubble', 'Стиль метки', ['text bubble', 'triangle', 'arrow'], group='Косметика')
+buy_label_color = input(buylbl, 'Цвет метки BUY', inline='Highlight', group='Косметика')
+sell_label_color = input(selllbl, 'Цвет метки SELL', inline='Highlight', group='Косметика')
+label_text_color = input(color.white, 'Цвет текста метки', inline='Highlight', group='Косметика')
+
+var last_signal = ''
+var float buy_entry_price = na
+var float sell_entry_price = na
+var bool buy_label_plotted = false
+var bool sell_label_plotted = false
+
+if bullf and (disable_repeating_signals_param ? (last_signal != 'buy' ? true : na) : true)
+    buy_entry_price := close
+    buy_label_plotted := false  // Reset label plotted flag when a new buy signal occurs
+    if label_style == 'text bubble'
+        label.new(bullf ? bar_index : na, low, '▲ Bottom', color=buy_label_color, style=label.style_label_up, textcolor=label_text_color, size=label_size)
+    else if label_style == 'triangle'
+        label.new(bullf ? bar_index : na, low, '▲ Bottom', yloc=yloc.belowbar, color=buy_label_color, style=label.style_triangleup, textcolor=txtcl, size=label_size)
+    else if label_style == 'arrow'
+        label.new(bullf ? bar_index : na, low, '▲ Bottom', yloc=yloc.belowbar, color=buy_label_color, style=label.style_arrowup, textcolor=txtcl, size=label_size)
+
+    last_signal := 'buy'
+
+if bearf and (disable_repeating_signals_param ? (last_signal != 'sell' ? true : na) : true)
+    sell_entry_price := close
+    sell_label_plotted := false  // Reset label plotted flag when a new sell signal occurs
+    if label_style == 'text bubble'
+        label.new(bearf ? bar_index : na, high, '▼ TOP', color=sell_label_color, style=label.style_label_down, textcolor=label_text_color, size=label_size)
+    else if label_style == 'triangle'
+        label.new(bearf ? bar_index : na, high, '▼ TOP', yloc=yloc.abovebar, color=sell_label_color, style=label.style_triangledown, textcolor=txtcl, size=label_size)
+    else if label_style == 'arrow'
+        label.new(bearf ? bar_index : na, high, '▼ TOP', yloc=yloc.abovebar, color=sell_label_color, style=label.style_arrowdown, textcolor=txtcl, size=label_size)
+
+    last_signal := 'sell'
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+var g_EMAS = "██████Скользящие средние (RMA, SMA, EMA, VWMA)██████"
+LenghtBool1 = input.bool(false, '', group=g_EMAS, inline='len1')
+len1 = input.int(15, title='MA 1', group=g_EMAS, inline='len1')
+string ma_1_type = input.string(defval='EMA', title='Тип', options=['RMA', 'SMA', 'EMA', 'VWMA'], inline='len1', group=g_EMAS)
+color ma_1_colour = input.color(color.rgb(51, 199, 15), '', inline='len1', group=g_EMAS)
+
+LenghtBool2 = input.bool(false, '', group=g_EMAS, inline='len2')
+len2 = input.int(30, minval=1, title='MA 2', group=g_EMAS, inline='len2')
+string ma_2_type = input.string(defval='EMA', title='Тип', options=['RMA', 'SMA', 'EMA', 'VWMA'], inline='len2', group=g_EMAS)
+color ma_2_colour = input.color(color.rgb(255, 94, 0), '', inline='len2', group=g_EMAS)
+
+LenghtBool3 = input.bool(false, '', group=g_EMAS, inline='len3')
+len3 = input.int(55, minval=1, title='MA 3', group=g_EMAS, inline='len3')
+string ma_3_type = input.string(defval='EMA', title='Тип', options=['RMA', 'SMA', 'EMA', 'VWMA'], inline='len3', group=g_EMAS)
+color ma_3_colour = input.color(color.new(color.aqua, 0), '', inline='len3', group=g_EMAS)
+
+LenghtBool4 = input.bool(false, '', group=g_EMAS, inline='len4')
+len4 = input.int(200, minval=1, title='MA 4', group=g_EMAS, inline='len4')
+string ma_4_type = input.string(defval='EMA', title='Тип', options=['RMA', 'SMA', 'EMA', 'VWMA'], inline='len4', group=g_EMAS)
+color ma_4_colour = input.color(color.black, '', inline='len4', group=g_EMAS)
+
+FunctionMA(source, length, type) =>
+    switch type
+        "RMA" => ta.rma(source, length)
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+ma1 = FunctionMA(close, len1, ma_1_type)
+ma2 = FunctionMA(close, len2, ma_2_type)
+ma3 = FunctionMA(close, len3, ma_3_type)
+ma4 = FunctionMA(close, len4, ma_4_type)
+
+plot(LenghtBool1 ? ma1 : na, color=ma_1_colour)
+plot(LenghtBool2 ? ma2 : na, color=ma_2_colour)
+plot(LenghtBool3 ? ma3 : na, color=ma_3_colour)
+plot(LenghtBool4 ? ma4 : na, color=ma_4_colour)
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// === Input Parameters ===
+
+rsiPeriod = input.int(14, title="Период RSI")
+
+neutralLower = input.int(45, title="Нижняя граница нейтрального диапазона")  // Нижняя граница нейтрального диапазона
+
+neutralUpper = input.int(55, title="Верхняя граница нейтрального диапазона")  // Верхняя граница нейтрального диапазона
+// === Trend Threshold Inputs ===
+
+bullishThreshold = input.int(55, title="Порог бычьего тренда")  // Порог бычьего тренда
+
+bearishThreshold = input.int(45, title="Порог медвежьего тренда")  // Порог медвежьего тренда
+// === RSI Calculation ===
+
+rsiValue = ta.rsi(close, rsiPeriod)
+// === Define Signal Locking States ===
+
+var bool hasBuySignal = false  // Инициализация как false
+
+var bool hasSellSignal = false // Инициализация как false
+// === Buy and Sell Conditions ===
+
+buySignal = rsiValue > bullishThreshold and not hasBuySignal
+
+sellSignal = rsiValue < bearishThreshold and not hasSellSignal
+// === Reversal Conditions ===
+
+bullishReversal = ta.crossover(rsiValue, neutralLower)  // RSI пересекает снизу вверх 45
+
+bearishReversal = ta.crossunder(rsiValue, neutralUpper)  // RSI пересекает сверху вниз 55
+// === Lock the Signals ===
+
+if buySignal
+
+    hasBuySignal := true
+
+    hasSellSignal := false
+
+if sellSignal
+
+    hasSellSignal := true
+
+    hasBuySignal := false
+
+// === Plot Reversal Signals (🔹🔸) ===
+
+plotshape(series=bullishReversal, title="Бычий разворот", location=location.belowbar, text="🔹exit", size=size.tiny)
+
+plotshape(series=bearishReversal, title="Медвежий разворот", location=location.abovebar, text="🔸exit", size=size.tiny)
+
+// === Bar Coloring for Trend ===
+trendDirection = rsiValue > bullishThreshold ? "Up" : rsiValue < bearishThreshold ? "Down" : "Neutral"
+barColor = trendDirection == "Up" ? color.green : trendDirection == "Down" ? color.red : color.blue
+barcolor(barColor)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+// //@version=5
+// indicator("HTF Candle Projections", overlay=true, max_bars_back=500, max_boxes_count=500)
+
+var tf = input.timeframe("30", "Таймфрейм", inline="tf", group="Настройки")
+var tf_auto = input.bool(false, "Установить автоматически", inline="tf", group="Настройки")
+var tf_2lvs = input.bool(false, "Два уровня", inline="tf", group="Настройки")
+var num = input.int(1, "Количество свечей HTF", minval=1, group="Настройки")
+var offset = input.int(2, "Смещение", group="Настройки")
+var size = input.string("Medium", "Размер", options=["Small", "Medium", "Large"], group="Настройки")
+var type = input.string("Свечи", "Тип", options=["Свечи", "Heikin Ashi"], group="Настройки")
+var margin = input.int(1, "Отступ", group="Настройки")
+var htf_data = input.string("Is Weekly", "Использовать данные HTF для генерации свечей", options=["Is Weekly", "Always", "Never"], group="Настройки")
+var up_col = input.color(color.new(#6ba583, 0), "Тело", inline="Свечи", group="Восходящие свечи")
+var up_col_wick = input.color(color.black, "Фитиль", inline="Свечи", group="Восходящие свечи")
+var up_col_border = input.color(color.black, "Граница", inline="Свечи", group="Восходящие свечи")
+var down_col = input.color(color.new(#d75442, 0), "Тело", inline="Свечи", group="Нисходящие свечи")
+var down_col_wick = input.color(color.black, "Фитиль", inline="Свечи", group="Нисходящие свечи")
+var down_col_border = input.color(color.black, "Граница", inline="Свечи", group="Нисходящие свечи")
+var o_col = input.color(color.new(color.black, 10), "", inline="o", group="Проекции")
+var o_style = input.string("Dotted", "", options=["Solid", "Dotted", "Dashed"], inline="o", group="Проекции")
+var o_width = input.int(1, "Ширина", minval=1, inline="o", group="Проекции")
+var o_enabled = input.bool(false, "Открытие", inline="o", group="Проекции")
+var hl_col = input.color(color.new(color.black, 10), "", inline="hl", group="Проекции")
+var hl_style = input.string("Dotted", "", options=["Solid", "Dotted", "Dashed"], inline="hl", group="Проекции")
+var hl_width = input.int(1, "Ширина", minval=1, inline="hl", group="Проекции")
+var hl_enabled = input.bool(true, "High/Low", inline="hl", group="Проекции")
+var ohlc_col = input.color(color.new(color.black, 10), "", inline="ohlc", group="Проекции")
+var ohlc_size = input.string("Normal", "", options=["Auto", "Tiny", "Small", "Normal", "Large", "Huge"], inline="ohlc", group="Проекции")
+var ohlc_enabled = input.bool(false, "Цены OHLC", inline="ohlc", group="Проекции")
+
+type Candle
+    box body
+    line upperWick
+    line lowerWick
+    line o
+    line h
+    line l
+    label labelO
+    label labelH
+    label labelL
+    label labelC
+
+getAutoTimeframe(s, m5, m15, m60, m240, m, d, w, q, y) =>
+    timeframe.isseconds ? s :
+     timeframe.isminutes ?
+      timeframe.multiplier < 5 ? m5 :
+      timeframe.multiplier < 15 ? m15 :
+      timeframe.multiplier < 60 ? m60 :
+      timeframe.multiplier < 240 ? m240 : m :
+     timeframe.isdaily ? d :
+     timeframe.isweekly ? w :
+     timeframe.ismonthly and timeframe.multiplier < 6 ? q : y
+
+determineAutoTimeframe() =>
+    if tf_2lvs
+        getAutoTimeframe('5', '15', '60', '240', '1D', '1W', '1M', '3M', '12M', '12M')
+    else
+        getAutoTimeframe('1', '5', '15', '60', '240', '1D', '1W', '1M', '3M', '12M')
+
+getSizeMultiplier() =>
+    result = switch size
+        "Small" => 1
+        "Medium" => 2
+        "Large" => 3
+    result
+
+getLineStyle(style) =>
+    result = switch style
+        "Solid" => line.style_solid
+        "Dotted" => line.style_dotted
+        "Dashed" => line.style_dashed
+    result
+
+getLabelSize() =>
+    result = switch ohlc_size
+        "Auto" => size.auto
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        "Huge" => size.huge
+    result
+
+var maxIndex = num - 1
+var curr_tf = tf_auto ? determineAutoTimeframe() : tf
+var useHtfData = (timeframe.isweekly and htf_data == "Is Weekly") or htf_data == "Always"
+var sizeMultiplier = getSizeMultiplier()
+newCandle = ta.change(time(curr_tf)) != 0
+
+ohlc() =>
+    [htf_o, htf_h, htf_l, htf_c] = request.security(syminfo.tickerid, curr_tf, [open, high, low, close], lookahead=barmerge.lookahead_on)
+
+    var o = 0.
+    var h = 0.
+    var l = 0.
+    c = close
+
+    if newCandle
+        o := open
+        h := high
+        l := low
+    else
+        h := math.max(high, h)
+        l := math.min(low, l)
+
+    [o, h, l, c, htf_o, htf_h, htf_l, htf_c]
+
+getCandlePostion(l_pos) =>
+    m_pos = l_pos + sizeMultiplier
+    r_pos = l_pos + (sizeMultiplier * 2)
+    [m_pos, r_pos]
+
+createLabel(r_pos, s) =>
+    label.new(r_pos, s, str.tostring(s, format.mintick), style=label.style_label_left, color=color.new(color.black, 100), textcolor=ohlc_col, size=getLabelSize())
+
+createLabels(Candle candle, o, h, l, c, l_pos) =>
+    if ohlc_enabled
+        [m_pos, r_pos] = getCandlePostion(l_pos)
+        candle.labelO := createLabel(r_pos, o)
+        candle.labelH := createLabel(r_pos, h)
+        candle.labelL := createLabel(r_pos, l)
+        candle.labelC := createLabel(r_pos, c)
+
+moveLabel(label la, r_pos, s) =>
+    la.set_text(str.tostring(s, format.mintick))
+    la.set_xy(r_pos, s)
+
+moveLabels(Candle candle, l_pos, o, h, l, c) =>
+    [m_pos, r_pos] = getCandlePostion(l_pos)
+    moveLabel(candle.labelO, r_pos, o)
+    moveLabel(candle.labelH, r_pos, h)
+    moveLabel(candle.labelL, r_pos, l)
+    moveLabel(candle.labelC, r_pos, c)
+
+deleteLabels(Candle candle) =>
+    candle.labelO.delete()
+    candle.labelH.delete()
+    candle.labelL.delete()
+    candle.labelC.delete()
+
+createProjections(Candle candle, o, h, l, curr_o, curr_h, curr_l, htf_o, htf_h, htf_l, l_pos) =>
+    [m_pos, r_pos] = getCandlePostion(l_pos)
+    b_o = bar_index
+    b_h = bar_index
+    b_l = bar_index
+    o_o = o
+    o_h = h
+    o_l = l
+    if useHtfData
+        if htf_o != o
+            b_o := b_o - 1
+            o_o := curr_o
+        if htf_h != h
+            b_h := b_h - 1
+            o_h := curr_h
+        if htf_l != l
+            b_l := b_l - 1
+            o_l := curr_l
+
+    if o_enabled
+        candle.o := line.new(b_o, o_o, m_pos, o_o, style=getLineStyle(o_style), color=o_col, width=o_width)
+    if hl_enabled
+        candle.h := line.new(b_h, o_h, m_pos, o_h, style=getLineStyle(hl_style), color=hl_col, width=hl_width)
+        candle.l := line.new(b_l, o_l, m_pos, o_l, style=getLineStyle(hl_style), color=hl_col, width=hl_width)
+
+moveProjections(Candle candle, l_pos, o, h, l, curr_o, curr_h, curr_l) =>
+    [m_pos, r_pos] = getCandlePostion(l_pos)
+    candle.o.set_y1(curr_o)
+    candle.o.set_xy2(m_pos, curr_o)
+    old_h = candle.h.get_y1()
+    old_l = candle.l.get_y1()
+
+    if h > old_h or (useHtfData and h[1] < old_h)
+        candle.h.set_x1(bar_index)
+    candle.h.set_y1(curr_h)
+    candle.h.set_xy2(m_pos, curr_h)
+
+    if l < old_l or (useHtfData and l[1] > old_l)
+        candle.l.set_x1(bar_index)
+    candle.l.set_y1(curr_l)
+    candle.l.set_xy2(m_pos, curr_l)
+
+deleteProjections(Candle candle) =>
+    candle.o.delete()
+    candle.h.delete()
+    candle.l.delete()
+
+getCandleProperties(o, h, l, c) =>
+    h_body = math.max(o, c)
+    l_body = math.min(o, c)
+    body_col = o > c ? down_col : up_col
+    wick_col = o > c ? down_col_wick : up_col_wick
+    border_col = o > c ? down_col_border : up_col_border
+    [h_body, l_body, body_col, wick_col, border_col]
+
+createCandle(l_pos, o, h, l, c) =>
+    [m_pos, r_pos] = getCandlePostion(l_pos)
+    [h_body, l_body, body_col, wick_col, border_col] = getCandleProperties(o, h, l, c)
+    candle = Candle.new()
+    candle.body := box.new(l_pos, h_body, r_pos, l_body, border_col, bgcolor=body_col)
+    candle.upperWick := line.new(m_pos, h_body, m_pos, h, color=wick_col)
+    candle.lowerWick := line.new(m_pos, l_body, m_pos, l, color=wick_col)
+    candle
+
+moveCandle(Candle candle, l_pos) =>
+    [m_pos, r_pos] = getCandlePostion(l_pos)
+    candle.body.set_left(l_pos)
+    candle.body.set_right(r_pos)
+    candle.upperWick.set_x1(m_pos)
+    candle.upperWick.set_x2(m_pos)
+    candle.lowerWick.set_x1(m_pos)
+    candle.lowerWick.set_x2(m_pos)
+
+updateCandle(Candle candle, l_pos, o, h, l, c) =>
+    [m_pos, r_pos] = getCandlePostion(l_pos)
+    [h_body, l_body, body_col, wick_col, border_col] = getCandleProperties(o, h, l, c)
+    candle.body.set_bgcolor(body_col)
+    candle.body.set_lefttop(l_pos, h_body)
+    candle.body.set_rightbottom(r_pos, l_body)
+    candle.body.set_border_color(border_col)
+    candle.upperWick.set_color(wick_col)
+    candle.upperWick.set_xy1(m_pos, h_body)
+    candle.upperWick.set_xy2(m_pos, h)
+    candle.lowerWick.set_color(wick_col)
+    candle.lowerWick.set_xy1(m_pos, l_body)
+    candle.lowerWick.set_xy2(m_pos, l)
+
+deleteCandle(Candle candle) =>
+    candle.body.delete()
+    candle.upperWick.delete()
+    candle.lowerWick.delete()
+    deleteLabels(candle)
+    deleteProjections(candle)
+
+var candles = array.new<Candle>(num, Candle.new())
+[o, h, l, c, htf_o, htf_h, htf_l, htf_c] = ohlc()
+curr_o = o
+curr_h = h
+curr_l = l
+curr_c = c
+
+if useHtfData
+    curr_o := htf_o
+    curr_h := htf_h
+    curr_l := htf_l
+    curr_c := htf_c
+
+candle_o = curr_o
+candle_h = curr_h
+candle_l = curr_l
+candle_c = curr_c
+
+if type == "Heikin Ashi" and not chart.is_heikinashi
+    candle_c := (curr_o + curr_h + curr_l + curr_c) / 4
+    if newCandle
+        candle_o := na(candle_o[1]) ? (curr_o + curr_c) / 2 : (nz(candle_o[1]) + nz(candle_c[1])) / 2
+    else
+        candle_o := nz(candle_o[1])
+    candle_h := math.max(curr_h, candle_o, candle_c)
+    candle_l := math.min(curr_l, candle_o, candle_c)
+
+if newCandle
+    oldCandle = candles.shift()
+    deleteCandle(oldCandle)
+    pos = bar_index + offset + maxIndex * (3 + sizeMultiplier)
+    candle = createCandle(pos, candle_o, candle_h, candle_l, candle_c)
+    createProjections(candle, o, h, l, curr_o, curr_h, curr_l, htf_o, htf_h, htf_l, pos)
+    createLabels(candle, curr_o, curr_h, curr_l, curr_c, pos)
+    candles.push(candle)
+
+for [i, candle] in candles
+    new_pos = bar_index + offset + i * (margin + (2 * sizeMultiplier))
+    if i < maxIndex
+        moveCandle(candle, new_pos)
+        deleteProjections(candle)
+        deleteLabels(candle)
+    else
+        updateCandle(candle, new_pos, candle_o, candle_h, candle_l, candle_c)
+        moveProjections(candle, new_pos, o, h, l, curr_o, curr_h, curr_l)
+        moveLabels(candle, new_pos, curr_o, curr_h, curr_l, curr_c)
+var table wm = table.new(position.bottom_right, 1, 1)
+if barstate.isfirst
+    table.cell(wm, 0, 0, "Telegram @IndicatorsforTV", text_color = color.new(color.gray, 70), text_size = size.large)
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////// Зоны Supply/Demand POI
+//////////////////////////////////////////////////
+POIswitch = input.bool(true, "Зоны Supply/Demand", group='¦¦¦¦¦¦Переключатель панели (Индикаторы наложения)¦¦¦¦¦¦', inline='S3')
+G_POI = '¦¦¦¦¦¦Настройки зон Supply/Demand POI¦¦¦¦¦¦'
+POIATR = ta.atr(50)
+ColorSupply = input.color(color.rgb(204, 17, 92, 50), title='Supply', group=G_POI, inline='POI3')
+ColorSupplyOutline = input.color(#11010100, title='Края Supply - POI', group=G_POI, inline='POI3')
+ColorDemand = input.color(color.rgb(0, 138, 153, 50), title='Demand', group=G_POI, inline='POI4')
+ColorDemandOutline = input.color(#1a010100, title='Края Demand - POI', group=G_POI, inline='POI4')
+SwingLength = input.int(4, title='Длина свинга High/Low', group=G_POI, minval=1, maxval=50, inline='POI1')
+HistoryDemandKepp = input.int(2, title='История для сохранения', minval=1, maxval=50, group=G_POI, inline='POI1')
+BoxWidth = input.float(4, title='Ширина зоны Supply/Demand', group=G_POI, minval=1, maxval=10, step=0.5, inline='POI2')
+ColorLabelPOI = input.color(#bdbdbd, title='Метка POI', group=G_POI, inline='POI2')
+MaxExtention = input.bool(false, title="Расширение", group=G_POI, inline='POI2')
+
+//      FUNCTION TO ADD NEW AND Remove LAST IN ARRAY
+ArrayAddPopF(array, new_value_to_add) =>
+    array.unshift(array, new_value_to_add)
+    array.pop(array)
+
+//      FUNCTION MAKE SURE SUPPLY ISNT OVERLAPPING
+CheckOverlappingF(new_poi, box_array, POIATR) =>
+
+    atr_threshold = POIATR * 2
+    okay_to_draw = true
+
+    for i = 0 to array.size(box_array) - 1
+        top = box.get_top(array.get(box_array, i))
+        bottom = box.get_bottom(array.get(box_array, i))
+        poi = (top + bottom) / 2
+
+        upper_boundary = poi + atr_threshold
+        lower_boundary = poi - atr_threshold
+
+        if new_poi >= lower_boundary and new_poi <= upper_boundary
+            okay_to_draw := false
+            break
+        else
+            okay_to_draw := true
+    okay_to_draw
+
+//      FUNCTION TO DRAW SUPPLY OR DEMAND ZONE
+SupplyDemandF(value_array, bn_array, box_array, label_array, box_type, POIATR) =>
+
+    atr_buffer = POIATR * (BoxWidth / 10)
+    box_left = array.get(bn_array, 0)
+    box_right = bar_index
+
+    var float box_top = 0.00
+    var float box_bottom = 0.00
+    var float poi = 0.00
+
+    if box_type == 1
+        box_top := array.get(value_array, 0)
+        box_bottom := box_top - atr_buffer
+        poi := (box_top + box_bottom) / 2
+    else if box_type == -1
+        box_bottom := array.get(value_array, 0)
+        box_top := box_bottom + atr_buffer
+        poi := (box_top + box_bottom) / 2
+
+    okay_to_draw = CheckOverlappingF(poi, box_array, POIATR)
+
+    //delete oldest box, and then create a new box and add it to the array
+    if box_type == 1 and okay_to_draw and POIswitch
+        box.delete(array.get(box_array, array.size(box_array) - 1))
+        ArrayAddPopF(box_array, box.new(left=box_left, top=box_top, right=box_right, bottom=box_bottom, border_color=ColorSupplyOutline,
+             bgcolor=ColorSupply, extend=MaxExtention ? extend.right : extend.none, text='Supply', text_halign=text.align_center, text_valign=text.align_center, text_color=ColorLabelPOI, text_size=size.small, xloc=xloc.bar_index))
+
+        box.delete(array.get(label_array, array.size(label_array) - 1))
+        ArrayAddPopF(label_array, box.new(left=box_left, top=poi, right=box_right, bottom=poi, border_color=color.new(ColorLabelPOI, 90),
+             bgcolor=color.new(ColorLabelPOI, 90), extend=MaxExtention ? extend.right : extend.none, text='POI', text_halign=text.align_left, text_valign=text.align_center, text_color=ColorLabelPOI, text_size=size.small, xloc=xloc.bar_index))
+
+    else if box_type == -1 and okay_to_draw and POIswitch
+        box.delete(array.get(box_array, array.size(box_array) - 1))
+        ArrayAddPopF(box_array, box.new(left=box_left, top=box_top, right=box_right, bottom=box_bottom, border_color=ColorDemandOutline,
+             bgcolor=ColorDemand, extend=MaxExtention ? extend.right : extend.none, text='Demand', text_halign=text.align_center, text_valign=text.align_center, text_color=ColorLabelPOI, text_size=size.small, xloc=xloc.bar_index))
+
+        box.delete(array.get(label_array, array.size(label_array) - 1))
+        ArrayAddPopF(label_array, box.new(left=box_left, top=poi, right=box_right, bottom=poi, border_color=color.new(ColorLabelPOI, 90),
+             bgcolor=color.new(ColorLabelPOI, 90), extend=MaxExtention ? extend.right : extend.none, text='POI', text_halign=text.align_left, text_valign=text.align_center, text_color=ColorLabelPOI, text_size=size.small, xloc=xloc.bar_index))
+
+//      FUNCTION TO CHANGE SUPPLY/DEMAND TO A BOS IF BROKEN
+BosSdF(box_array, bos_array, label_array, zone_type) =>
+
+    if zone_type == 1 and POIswitch
+        for i = 0 to array.size(box_array) - 1
+            level_to_break = box.get_top(array.get(box_array, i))
+            if close >= level_to_break
+                copied_box = box.copy(array.get(box_array, i))
+                ArrayAddPopF(bos_array, copied_box)
+                mid = (box.get_top(array.get(box_array, i)) + box.get_bottom(array.get(box_array, i))) / 2
+                box.set_top(array.get(bos_array, 0), mid)
+                box.set_bottom(array.get(bos_array, 0), mid)
+                box.set_extend(array.get(bos_array, 0), extend.none)
+                box.set_right(array.get(bos_array, 0), bar_index)
+                box.set_text(array.get(bos_array, 0), '')
+                box.set_text_color(array.get(bos_array, 0), color.new(color.white, 0))
+                box.set_text_size(array.get(bos_array, 0), size.small)
+                box.set_text_halign(array.get(bos_array, 0), text.align_center)
+                box.set_text_valign(array.get(bos_array, 0), text.align_center)
+                box.delete(array.get(box_array, i))
+                box.delete(array.get(label_array, i))
+
+    if zone_type == -1 and POIswitch
+        for i = 0 to array.size(box_array) - 1
+            level_to_break = box.get_bottom(array.get(box_array, i))
+            if close <= level_to_break
+                copied_box = box.copy(array.get(box_array, i))
+                ArrayAddPopF(bos_array, copied_box)
+                mid = (box.get_top(array.get(box_array, i)) + box.get_bottom(array.get(box_array, i))) / 2
+                box.set_top(array.get(bos_array, 0), mid)
+                box.set_bottom(array.get(bos_array, 0), mid)
+                box.set_extend(array.get(bos_array, 0), extend.none)
+                box.set_right(array.get(bos_array, 0), bar_index)
+                box.set_text(array.get(bos_array, 0), '')
+                box.set_text_color(array.get(bos_array, 0), color.new(color.white, 0))
+                box.set_text_size(array.get(bos_array, 0), size.small)
+                box.set_text_halign(array.get(bos_array, 0), text.align_center)
+                box.set_text_valign(array.get(bos_array, 0), text.align_center)
+                box.delete(array.get(box_array, i))
+                box.delete(array.get(label_array, i))
+
+//      FUNCTION MANAGE CURRENT BOXES BY CHANGING ENDPOINT
+BoxExtendEndPointF(box_array) =>
+
+    for i = 0 to array.size(box_array) - 1
+        box.set_right(array.get(box_array, i), bar_index + 90)
+
+//      CALCULATE SWING HIGHS & SWING LOWS
+SwingHigh = ta.pivothigh(high, SwingLength, SwingLength)
+SwingLow = ta.pivotlow(low, SwingLength, SwingLength)
+
+//      ARRAYS FOR SWING H/L & BN
+var SwingHighValHues = array.new_float(5, 0.00)
+var SwingLowValues = array.new_float(5, 0.00)
+
+var SwingHighBNS = array.new_int(5, 0)
+var SwingLowBNS = array.new_int(5, 0)
+
+//      ARRAYS FOR SUPPLY / DEMAND
+var SupplyBoxCurrent = array.new_box(HistoryDemandKepp, na)
+var DemandBoxCurrent = array.new_box(HistoryDemandKepp, na)
+
+//      ARRAYS FOR SUPPLY / DEMAND POI LABELS
+var SupplyPOICurrent = array.new_box(HistoryDemandKepp, na)
+var DemandPOICurrent = array.new_box(HistoryDemandKepp, na)
+
+//      ARRAYS FOR BOS
+var BOSSupply = array.new_box(5, na)
+var BOSDemand = array.new_box(5, na)
+//
+//END CALCULATIONS
+//
+//      NEW SWING HIGH
+if not na(SwingHigh)
+
+    //MANAGE SWING HIGH VALUES
+    ArrayAddPopF(SwingHighValHues, SwingHigh)
+    ArrayAddPopF(SwingHighBNS, bar_index[SwingLength])
+    SupplyDemandF(SwingHighValHues, SwingHighBNS, SupplyBoxCurrent, SupplyPOICurrent, 1, POIATR)
+
+//   NEW SWING LOW
+else if not na(SwingLow)
+
+    //MANAGE SWING LOW VALUES
+    ArrayAddPopF(SwingLowValues, SwingLow)
+    ArrayAddPopF(SwingLowBNS, bar_index[SwingLength])
+    SupplyDemandF(SwingLowValues, SwingLowBNS, DemandBoxCurrent, DemandPOICurrent, -1, POIATR)
+
+BosSdF(SupplyBoxCurrent, BOSSupply, SupplyPOICurrent, 1)
+BosSdF(DemandBoxCurrent, BOSDemand, DemandPOICurrent, -1)
+
+BoxExtendEndPointF(SupplyBoxCurrent)
+BoxExtendEndPointF(DemandBoxCurrent)
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// indicator('Volume Delta [hapharmonic]', max_bars_back=5000, max_labels_count=500, overlay=true)
+
+//------------------------------------------
+//                Settings                 |
+//------------------------------------------
+// Inputs Table
+FV = format.volume, FP = format.percent
+bool usecandle = input.bool(false, title='Объем на свечах')
+color C_Up = input.color(#12cef8, title='Объем покупок', inline='', group="Стиль")
+color C_Down = input.color(#fe3f00, title='Объем продаж', inline='', group="Стиль")
+bool MAV = input.bool(false, title='EMA', group="EMA")
+string volumeOption = input.string("Use Volume Confirmation", title="Опция объема", options=["none", "Use Volume Confirmation"], group="EMA")
+bool useVolumeConfirmation = volumeOption == 'none' ? false : true
+int emaFastLength = input(9, title="Длина быстрой EMA", group="EMA")
+int emaSlowLength = input(15, title="Длина медленной EMA", group="EMA")
+
+int volumeConfirmationLength = input(6, title="Длина подтверждения объема", group="EMA")
+string alert_freq = input.string(alert.freq_once_per_bar_close, title="Частота оповещений",
+                                         options=[alert.freq_once_per_bar, alert.freq_once_per_bar_close], group="EMA",
+                                         tooltip='Если вы выберете once_per_bar, вы будете получать мгновенные уведомления (но это может вызвать перерисовку индикатора).
+                                         \n Однако, если вы выберете once_per_bar_close, он будет ждать подтверждения сигнала свечой перед уведомлением.')
+
+//------------------------------------------
+//             UDT_identifier              |
+//------------------------------------------
+// Define User Defined Type (UDT) for OHLCV data with default values
+type OHLCV
+    float O = open
+    float H = high
+    float L = low
+    float C = close
+    float V = volume
+
+// Define UDT for Volume Data
+type VolumeData
+    float buyVol
+    float sellVol
+    float pcBuy        // Stores percentage of buy volume
+    float pcSell       // Stores percentage of sell volume
+    bool isBuyGreater // Indicates if buy volume is greater True = Buy; otherwise, sell.
+    float higherVol    // Stores the higher volume value
+    float lowerVol     // Stores the lower volume value
+    color higherCol    // Stores the color for the higher volume bar
+    color lowerCol     // Stores the color for the lower volume bar
+
+//------------------------------------------
+//   Calculate volumes and percentages     |
+//------------------------------------------
+calcVolumes(OHLCV ohlcv) =>
+    var VolumeData data = VolumeData.new()
+    data.buyVol := ohlcv.V * (ohlcv.C - ohlcv.L) / (ohlcv.H - ohlcv.L) // Calculate buy volume using the formula: volume * (close - low) / (high - low)
+    data.sellVol := ohlcv.V - data.buyVol                               // Calculate sell volume by subtracting buy volume from total volume
+    data.pcBuy := data.buyVol / ohlcv.V * 100                         // Calculate the percentage of buy volume
+    data.pcSell := 100 - data.pcBuy                                    // Calculate the percentage of sell volume (100% - buy percentage)
+    data.isBuyGreater := data.buyVol > data.sellVol                          // Determine if buy volume is greater than sell volume
+    data.higherVol := data.isBuyGreater ? data.buyVol : data.sellVol     // Assign the higher volume value based on the comparison
+    data.lowerVol := data.isBuyGreater ? data.sellVol : data.buyVol      // Assign the lower volume value based on the comparison
+    data.higherCol := data.isBuyGreater ? C_Up : C_Down               // Assign the color for the higher volume bar based on the comparison
+    data.lowerCol := data.isBuyGreater ? C_Down : C_Up                 // Assign the color for the lower volume bar based on the comparison
+    data
+
+//------------------------------------------
+//             Get volume data             |
+//------------------------------------------
+// Instantiate OHLCV without explicit values (uses defaults)
+ohlcv = OHLCV.new()
+volData = calcVolumes(ohlcv)
+
+// Format percentages and volumes as strings before using in label text
+S(D, F) => str.tostring(D, F)
+volStr = S(math.sign(ta.change(ohlcv.C)) * ohlcv.V, FV)
+buyVolStr = S(volData.buyVol, FV)
+sellVolStr = S(volData.sellVol, FV)
+buyPercentStr = S(volData.pcBuy, FP)
+sellPercentStr = S(volData.pcSell, FP)
+totalbuyPercentC_ = volData.buyVol / (volData.buyVol + volData.sellVol) * 100
+sup = not na(ohlcv.V)
+
+//------------------------------------------
+// Draw volume levels on the candlesticks  |
+//------------------------------------------
+// Define base and value for gradient candles
+float base = na, float value = na
+bool uc = usecandle and sup
+// Calculate base and value based on buy/sell volume and open/close relationship
+if volData.isBuyGreater
+    base := math.min(ohlcv.O, ohlcv.C) // Start from the lower of open/close for buy
+    value := base + math.abs(ohlcv.O - ohlcv.C) * (volData.pcBuy / 100) // Extend to the percentage of buy volume
+else
+    base := math.max(ohlcv.O, ohlcv.C) // Start from the higher of open/close for sell
+    value := base - math.abs(ohlcv.O - ohlcv.C) * (volData.pcSell / 100) // Extend to the percentage of sell volume
+
+// Plot candles with gradient color
+barcolor(sup ? color.new(na, na) : ohlcv.C < ohlcv.O ? color.red : color.green, display=usecandle ? display.all : display.none)
+UseC = uc ? volData.higherCol : color.new(na, na)
+//Body
+plotcandle(uc ? base : na, uc ? base : na, uc ? value : na, uc ? value : na,
+           title='Body', color=UseC, bordercolor=na, wickcolor=UseC,
+           display=usecandle ? display.all - display.status_line : display.none, force_overlay=true, editable=false)
+//Candlestick edge
+plotcandle(uc ? ohlcv.O : na, uc ? ohlcv.H : na, uc ? ohlcv.L : na, uc ? ohlcv.C : na,
+           title='Fill', color=color.new(UseC, 80), bordercolor=UseC, wickcolor=UseC,
+           display=usecandle ? display.all - display.status_line : display.none, force_overlay=true, editable=false)
+//------------------------------------------------------------
+// Plot the EMA and filter out the noise with volume control. |
+//------------------------------------------------------------
+// Calculate EMAs
+float emaFast = ta.ema(ohlcv.C, emaFastLength), float emaSlow = ta.ema(ohlcv.C, emaSlowLength)
+bool signal = emaFast > emaSlow
+color c_signal = signal ? C_Up : C_Down
+// Calculate volume moving average
+float volumeMA = ta.sma(ohlcv.V, volumeConfirmationLength)
+// Determine crossover and crossunder conditions
+bool crossover = ta.crossover(emaFast, emaSlow), bool crossunder = ta.crossunder(emaFast, emaSlow)
+// Function to check for volume confirmation
+isVolumeConfirmed(source, length, ma) =>
+    math.sum(source > ma ? source : 0, length) >= math.sum(source < ma ? source : 0, length)
+// Check for volume confirmation on crossover and crossunder
+bool crossoverConfirmed = crossover and (not useVolumeConfirmation or isVolumeConfirmed(ohlcv.V, volumeConfirmationLength, volumeMA))
+bool crossunderConfirmed = crossunder and (not useVolumeConfirmation or isVolumeConfirmed(ohlcv.V, volumeConfirmationLength, volumeMA))
+// Plot EMAs with fill based on gradient
+PF = MAV ? emaFast : na, PS = MAV ? emaSlow : na
+D1 = plot(PF, color=c_signal, editable=false, force_overlay=true, display=display.pane)
+plot(PF, color=color.new(c_signal, 90), linewidth=5, editable=false, force_overlay=true, display=display.pane)
+D2 = plot(PS, color=c_signal, editable=false, force_overlay=true, display=display.pane)
+plot(PS, color=color.new(c_signal, 90), linewidth=5, editable=false, force_overlay=true, display=display.pane)
+// Fill area between EMAs based on crossover and volume confirmation
+fill(D1, D2, top_value=crossover ? emaFast : emaSlow,
+     bottom_value=crossover ? emaSlow : emaFast,
+     top_color=color.new(c_signal, 95),
+     bottom_color=color.new(c_signal, 95)
+     )
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings
+//---------------------------------------------------------------------------------------------------------------------{
+
+disp = display.all - display.status_line
+
+rpGR = 'Общие настройки профиля'
+Showprofle = input.bool(true, 'Показать профиль', group='Параметры индикатора', display=disp)
+rpLN = input.int(200, '  Длина периода / Фиксированный диапазон', minval=10, maxval=1500, step=10, group=rpGR, display=disp)
+rpLN := last_bar_index > rpLN ? rpLN - 1 : last_bar_index
+vpSRC = input.string('Volume', '  Источник профиля', options=['Volume', 'Money Flow'], group=rpGR, display=disp)
+
+vpGR = 'Настройки отображения профиля'
+vpTP = 'отображает общую торговую активность/денежный поток (общий интерес, как покупка, так и продажа) за указанный период времени на определенных уровнях цен\n\n' +
+          ' - уровни высокой торговой активности/денежного потока: уровни цен с высокой торговой активностью/денежным потоком - обычно представляют уровни консолидации\n' +
+          ' - уровни средней торговой активности/денежного потока: уровни цен со средней торговой активностью/денежным потоком\n' +
+          ' - уровни низкой торговой активности/денежного потока: уровни цен с низкой торговой активностью/денежным потоком - обычно представляют уровни спроса и предложения или уровни ликвидности\n\n' +
+          'длина строк указывает объем торговой активности/денежного потока на определенных уровнях цен'
+vpSH = input.bool(false, 'Профиль объема/денежного потока', group=vpGR, tooltip=vpTP, display=disp)
+
+vpHVC = input.color(color.white, '  Уровни высокой торговой активности', inline='VP1', group=vpGR)
+vpHVT = input.int(53, 'Порог %', minval=50, maxval=99, step=1, inline='VP1', group=vpGR, tooltip='диапазон опций [50-99]', display=disp) / 100
+vpAVC = input.color(color.new(#2962ff, 50), '  Уровни средней торговой активности', group=vpGR)
+vpLVC = input.color(color.new(#f23645, 50), '  Уровни низкой торговой активности', inline='VP2', group=vpGR)
+vpLVT = input.int(37, 'Порог %', minval=10, maxval=40, step=1, inline='VP2', group=vpGR, tooltip='диапазон опций [10-40]', display=disp) / 100
+
+spTP = 'отображает настроение, доминирующую сторону за указанный период времени на определенных уровнях цен\n\n' +
+          ' - уровни бычьего настроения: уровни цен, где объем покупок выше\n' +
+          ' - уровни медвежьего настроения: уровни цен, где объем продаж выше\n\n' +
+          'длина строк указывает силу покупателей/продавцов на определенных уровнях цен'
+spSH = input.bool(true, 'Профиль настроения', group=vpGR, tooltip=spTP)
+
+spPTT = 'условия, используемые для расчета объема покупок/продаж\n\n' +
+         '* полярность свечи\n   up => если close > open\n   down => если close <= open\n\n' +
+         '* давление покупок/продаж на свече\n   up => если (close - low) > (high - close)\n   down => если (close - low) <= (high - close)'
+spPT1 = 'Полярность свечи'
+spPT2 = 'Давление покупок/продаж на свече'
+spPTY = input.string(spPT1, '  Метод полярности настроения', options=[spPT1, spPT2], group=vpGR, tooltip=spPTT, display=disp)
+
+spBLC = input.color(color.new(#26a69a, 50), '  Уровни бычьего настроения', inline='SP', group=vpGR)
+spBRC = input.color(color.new(#ef5350, 50), 'Уровни медвежьего настроения', inline='SP', group=vpGR)
+
+othGR = 'Другие настройки отображения'
+
+pcTP = 'отображает уровень цен с наибольшей торговой активностью/денежным потоком или изменения уровней цен с наибольшей торговой активностью/денежным потоком'
+rpPC = input.string('Last(Zone)', '  Уровень значимости', options=['Developing', 'Last(Line)', 'Last(Zone)', 'None'], inline='PoC', group=othGR, tooltip=pcTP, display=disp)
+
+vaSH = input.bool(false, 'Зоны консолидации', group=othGR, display=disp)
+vaTH = input.int(25, '  Порог консолидации %', minval=0, maxval=100, inline='va', group=othGR, display=disp) / 100
+vaC = input.color(color.new(#2962ff, 73), '', inline='va', group=othGR)
+
+spTT = 'отображает зону цен с наибольшим бычьим или медвежьим настроением'
+spPC = input.bool(false, 'Зона наибольшего настроения', inline='spP', group=othGR, tooltip=spTT)
+
+rpPL = input.bool(false, 'Уровни цен профиля', inline='BBe', group=othGR)
+rpPLC = input.color(color.new(#00bcd4, 0), '', inline='BBe', group=othGR)
+rpLS = input.string('Small', "", options=['Tiny', 'Small', 'Normal'], inline='BBe', group=othGR, display=disp)
+
+rpBG = input.bool(false, 'Заполнение фона диапазона профиля', inline='BG', group=othGR)
+rpBGC = input.color(color.new(#00bcd4, 95), '', inline='BG', group=othGR)
+
+otGR = 'Другие настройки профиля'
+
+rpNR = input.int(25, '  Количество строк', minval=10, maxval=100, step=5, group=otGR, tooltip='диапазон опций [10-100]', display=disp)
+rpW = input.int(10, '  Ширина профиля %', minval=10, maxval=50, group=otGR, tooltip='диапазон опций [10-50]', display=disp) / 100
+vpLS = input.string('Auto', "  Размер текста профиля", options=['Auto', 'Tiny', 'Small'], group=otGR, display=disp)
+vpHO = input.int(05, '  Горизонтальный отступ профиля', group=otGR, tooltip='опция также позволяет использовать отрицательные числа, если профили будут перекрываться с графиком цен', display=disp)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// User Defined Types
+//---------------------------------------------------------------------------------------------------------------------{
+
+type bar
+    float o = open
+    float h = high
+    float l = low
+    float c = close
+    float v = volume
+    int i = bar_index
+    int n = bar_index
+    int t = time
+//---------------------------------------------------------------------------------------------------------------------}
+// Variables
+//---------------------------------------------------------------------------------------------------------------------{
+
+bar b = bar.new()
+
+rpVST = array.new_float(rpNR, 0.)
+rpVSB = array.new_float(rpNR, 0.)
+rpVSD = array.new_float(rpNR, 0.)
+
+var dRP = array.new_box()
+var pocPoints = array.new<chart.point>()
+var polyline pocPolyline = na
+var polyline spPolyline = na
+
+var color llC = na
+var color lsC = na
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Functions/Methods
+//---------------------------------------------------------------------------------------------------------------------{
+
+f_drawLabelX(_x, _y, _text, _style, _textcolor, _size, _tooltip) =>
+    var lb = label.new(_x, _y, _text, xloc.bar_index, yloc.price, color(na), _style, _textcolor, _size, text.align_left, _tooltip)
+    lb.set_xy(_x, _y)
+    lb.set_text(_text)
+    lb.set_tooltip(_tooltip)
+    lb.set_textcolor(_textcolor)
+
+// END
+
+
+
+// === Dashboard with Telegram Link ===
+var table myTable = table.new(position.top_center, 1, 1, border_width=1, frame_color=color.black, bgcolor=color.white)
+
+// Add Telegram Message to Dashboard
+table.cell(myTable, 0, 0, "Join Telegram @IndicatorsforTV", bgcolor=color.blue, text_color=color.white, text_size=size.normal)
+
